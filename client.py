@@ -365,6 +365,58 @@ class KakaotoonClient:
                 continue
         raise KakaotoonError(f'복호화 실패: 모든 조합 시도. last={last_err}')
 
+    # ---- 이미지 포맷 변환 ----
+    @staticmethod
+    def to_image_format(image_bytes: bytes, fmt: str,
+                        jpg_quality: int = 92) -> Tuple[bytes, str]:
+        """복호화된 이미지 bytes를 jpg/png로 변환. fmt='webp'면 원본 그대로.
+        반환: (bytes, ext) — ext는 '.webp'/'.jpg'/'.png'.
+
+        이미 원본이 JPG/PNG였으면 (드물지만 fallback) 그 형식 유지.
+        """
+        # 원본 매직바이트로 이미 JPG/PNG면 그대로
+        if image_bytes[:3] == b'\xff\xd8\xff':
+            return image_bytes, '.jpg'
+        if image_bytes[:8] == b'\x89PNG\r\n\x1a\n':
+            return image_bytes, '.png'
+
+        fmt = (fmt or 'webp').lower().strip()
+        if fmt in ('webp', ''):
+            return image_bytes, '.webp'
+
+        try:
+            from PIL import Image
+        except Exception:
+            return image_bytes, '.webp'
+
+        try:
+            img = Image.open(io.BytesIO(image_bytes))
+            if fmt in ('jpg', 'jpeg'):
+                # JPG는 알파 채널 없음 — 흰 배경 합성
+                if img.mode in ('RGBA', 'LA'):
+                    bg = Image.new('RGB', img.size, (255, 255, 255))
+                    bg.paste(img, mask=img.split()[-1])
+                    img = bg
+                elif img.mode == 'P':
+                    img = img.convert('RGBA')
+                    bg = Image.new('RGB', img.size, (255, 255, 255))
+                    bg.paste(img, mask=img.split()[-1])
+                    img = bg
+                elif img.mode != 'RGB':
+                    img = img.convert('RGB')
+                out = io.BytesIO()
+                img.save(out, format='JPEG', quality=jpg_quality, optimize=False)
+                return out.getvalue(), '.jpg'
+            if fmt == 'png':
+                if img.mode == 'P':
+                    img = img.convert('RGBA')
+                out = io.BytesIO()
+                img.save(out, format='PNG', optimize=False)
+                return out.getvalue(), '.png'
+        except Exception:
+            pass
+        return image_bytes, '.webp'
+
     # ---- URL 파싱 ----
     @staticmethod
     def extract_content_id(url_or_id: str) -> Optional[int]:

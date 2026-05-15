@@ -19,6 +19,7 @@ _poc/
 _dump_*/
 _session/
 *.har
+*.cef
 cookies*.json
 browser_cookies.json
 

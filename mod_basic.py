@@ -26,6 +26,7 @@ class ModuleBasic(PluginModuleBase):
             'max_per_run': '1',
             'use_waitfree': 'True',
             'use_owned_ticket': 'False',
+            'output_format': 'webp',
             'auto_start': 'False',
         }
         self.web_list_model = ModelKakaotoonItem

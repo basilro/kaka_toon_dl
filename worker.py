@@ -72,6 +72,7 @@ class Worker:
         self.max_per_run = int(self.cfg.get('max_per_run') or '1')
         self.use_waitfree = (self.cfg.get('use_waitfree') or 'True') == 'True'
         self.use_owned_ticket = (self.cfg.get('use_owned_ticket') or 'False') == 'True'
+        self.output_format = (self.cfg.get('output_format') or 'webp').lower().strip()
         self.client: Optional[KakaotoonClient] = None
 
     @staticmethod
@@ -346,15 +347,11 @@ class Worker:
                     P.logger.warning('[%s] %s page %d 복호화 실패: %s — .cef 원본만 저장',
                                      content_title, episode_title, i, e)
                 if dec is not None:
-                    ext = '.webp'
-                    if dec[:3] == b'\xff\xd8\xff':
-                        ext = '.jpg'
-                    elif dec[:8] == b'\x89PNG\r\n\x1a\n':
-                        ext = '.png'
+                    data, ext = KakaotoonClient.to_image_format(dec, self.output_format)
                     local = os.path.join(save_dir, f'{i:03d}{ext}')
                     with open(local, 'wb') as fp:
-                        fp.write(dec)
-                    total_bytes += len(dec)
+                        fp.write(data)
+                    total_bytes += len(data)
                 else:
                     local = os.path.join(save_dir, f'{i:03d}.webp.cef')
                     with open(local, 'wb') as fp:

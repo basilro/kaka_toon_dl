@@ -33,8 +33,15 @@
         {{ macros.setting_input_text_and_buttons('download_path', '다운로드 경로',
             [['select_download_path_btn', '경로 선택']],
             value=arg['download_path'],
-            desc=['{다운로드경로}/{작품제목}/{NNNN_회차제목}/{001.webp ...} 형태로 저장됨',
-                  '※ AES-CBC 복호화 성공 시 .webp, 실패 시 원본 .webp.cef + _keys.json 저장']) }}
+            desc=['{다운로드경로}/{작품제목}/{NNNN_회차제목}/{001.<ext> ...} 형태로 저장됨',
+                  '※ AES-CBC 복호화 실패 시 원본 .webp.cef + _keys.json 저장']) }}
+
+        {{ macros.setting_input_text('output_format', '이미지 저장 형식',
+            value=arg['output_format'],
+            desc=['webp / jpg / png 중 하나. 기본: webp (변환 없음, 가장 빠름)',
+                  'jpg : 흰 배경으로 알파 합성 + JPEG quality 92',
+                  'png : 무손실 변환 (파일 큼)',
+                  '※ jpg/png 는 Pillow 사용 — 변환 시간/CPU 약간 소요']) }}
 
         {{ macros.setting_input_text('max_per_run', '기다무 1회 실행 최대 사용 장수',
             value=arg['max_per_run'],

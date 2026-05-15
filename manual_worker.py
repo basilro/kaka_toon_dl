@@ -272,6 +272,7 @@ def _download_episode(cli: KakaotoonClient, content_id: int, content_title: str,
     media = mr.get('media') or {}
     files = media.get('files') or []
     aid = media.get('aid'); zid = media.get('zid')
+    out_fmt = (P.ModelSetting.get('output_format') or 'webp').lower().strip()
     if not files:
         _ep_update(idx, state='failed', error='no media files')
         rec.status = 'failed'; rec.error_msg = 'no media files'; db.session.commit()
@@ -299,15 +300,11 @@ def _download_episode(cli: KakaotoonClient, content_id: int, content_title: str,
                 dec = None
                 P.logger.warning('[%s] %s page %d 복호화 실패: %s', content_title, episode_title, i, e)
             if dec is not None:
-                ext = '.webp'
-                if dec[:3] == b'\xff\xd8\xff':
-                    ext = '.jpg'
-                elif dec[:8] == b'\x89PNG\r\n\x1a\n':
-                    ext = '.png'
+                data, ext = KakaotoonClient.to_image_format(dec, out_fmt)
                 local = os.path.join(save_dir, f'{i:03d}{ext}')
                 with open(local, 'wb') as fp:
-                    fp.write(dec)
-                total_bytes += len(dec)
+                    fp.write(data)
+                total_bytes += len(data)
             else:
                 local = os.path.join(save_dir, f'{i:03d}.webp.cef')
                 with open(local, 'wb') as fp:
