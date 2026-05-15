@@ -208,46 +208,59 @@ class KakaotoonClient:
 
         반환: [{'title': '무적자', 'author': '노경찬, 휘, 임준욱',
                 'date': '5월 12일', 'kind': 'paid'|'ended'}]
+
+        구현: 줄 구조에 의존하지 않고 전체 텍스트에서 섹션 마커 위치와 항목
+        위치를 찾은 뒤, 각 항목이 어떤 섹션에 속하는지 위치 비교로 판단.
         """
         import html as _html
-        # <p> <br> 등 → 개행. 나머지 태그는 공백
-        plain = re.sub(r'<\s*(br|p|/p|/div|/li|li)[^>]*>', '\n', content_html or '',
-                       flags=re.IGNORECASE)
-        plain = re.sub(r'<[^>]+>', '', plain)
+        if not content_html:
+            return []
+        # 모든 HTML 태그를 \n 으로 치환 후 entity unescape — 블록/인라인 무관
+        plain = re.sub(r'<[^>]+>', '\n', content_html)
         plain = _html.unescape(plain)
 
-        results: List[Dict[str, str]] = []
-        kind = None  # paid / ended
-        # 아이템 패턴: 줄 시작에 "숫자." 다음 "제목 / 작가 (날짜)"
+        # 섹션 마커 위치 수집
+        section_positions: List[Tuple[int, str]] = []
+        for m in re.finditer(r'유료화\s*작품', plain):
+            section_positions.append((m.start(), 'paid'))
+        for m in re.finditer(r'종료\s*작품', plain):
+            section_positions.append((m.start(), 'ended'))
+        section_positions.sort()
+        if not section_positions:
+            return []
+
+        # 항목 패턴: "숫자<구분자> 제목 / 작가 (날짜)"
         item_re = re.compile(
-            r'^\s*\d+\s*[\.．、]\s*(.+?)\s*[/／]\s*(.+?)\s*\(([^)]+?)\)\s*$')
-        # 섹션 마커 패턴 — '<유료화 작품>', '〈유료화 작품〉', '유료화 작품' 등
-        # < 와 > 는 이미 HTML 디코딩 후 단순 문자.
-        section_re_paid = re.compile(r'유료화\s*작품')
-        section_re_ended = re.compile(r'종료\s*작품')
-        for raw_line in plain.split('\n'):
-            line = raw_line.strip()
-            if not line:
-                continue
-            # 섹션 마커 — 짧은 라인이면서 마커 패턴 포함 (제한 50자로 완화)
-            if len(line) < 50:
-                if section_re_paid.search(line):
-                    kind = 'paid'
-                    continue
-                if section_re_ended.search(line):
-                    kind = 'ended'
-                    continue
+            r'(\d+)\s*[\.．、\)]\s*([^\n/／<>]+?)\s*[/／]\s*([^\n<>]+?)\s*\(([^)]+?)\)')
+
+        def _kind_at(pos: int) -> Optional[str]:
+            kind = None
+            for sec_pos, sec_kind in section_positions:
+                if sec_pos < pos:
+                    kind = sec_kind
+                else:
+                    break
+            return kind
+
+        results: List[Dict[str, str]] = []
+        seen = set()
+        for m in item_re.finditer(plain):
+            kind = _kind_at(m.start())
             if kind is None:
                 continue
-            m = item_re.match(line)
-            if not m:
+            title = m.group(2).strip()
+            author = m.group(3).strip()
+            date = m.group(4).strip()
+            if not (1 <= len(title) <= 80):
                 continue
-            title = m.group(1).strip()
-            author = m.group(2).strip()
-            date = m.group(3).strip()
-            # 너무 짧거나 부적합한 항목 거름
-            if len(title) < 1 or len(title) > 80:
+            # 날짜 sanity: '월' 과 '일' 둘 다 포함되어야 (가짜 괄호 매칭 거름)
+            if '월' not in date or '일' not in date:
                 continue
+            # 같은 작품이 여러 번 잡히는 거 dedupe
+            key = (title, kind)
+            if key in seen:
+                continue
+            seen.add(key)
             results.append({'title': title, 'author': author,
                             'date': date, 'kind': kind})
         return results
