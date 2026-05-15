@@ -220,9 +220,15 @@ class Worker:
             P.logger.warning('공지 목록 조회 실패: %s', e)
             return 0
 
+        P.logger.info('공지 응답 %d개', len(notices))
+        # 상위 5개 제목 미리보기 (디버깅용)
+        for n in notices[:5]:
+            P.logger.info('  - id=%s, title=%r', n.get('id'), n.get('title'))
+
         paid_notices = [n for n in notices
                         if '유료화' in (n.get('title') or '')
                         or '종료' in (n.get('title') or '')]
+        P.logger.info('유료화/종료 매칭 공지: %d개', len(paid_notices))
         if not paid_notices:
             P.logger.info('유료화/종료 공지 없음')
             return 0
@@ -233,7 +239,15 @@ class Worker:
         skipped_past = 0
         for n in paid_notices:
             year = self._extract_notice_year(n.get('title') or '')
-            items = KakaotoonClient.parse_paid_notice(n.get('content') or '')
+            content = n.get('content') or ''
+            items = KakaotoonClient.parse_paid_notice(content)
+            P.logger.info('  공지 id=%s title=%r → 본문 %dB, 파싱 %d개',
+                          n.get('id'), n.get('title'), len(content), len(items))
+            if not items and content:
+                # 본문은 있는데 파싱이 0 → 처음 300자 미리보기 (한 번만 진단용)
+                preview = re.sub(r'<[^>]+>', ' ', content[:600])
+                preview = re.sub(r'\s+', ' ', preview).strip()
+                P.logger.info('    [파싱실패 진단] 본문 미리보기: %s', preview[:300])
             for it in items:
                 t = it['title']
                 if t in seen_titles:

@@ -221,17 +221,22 @@ class KakaotoonClient:
         # 아이템 패턴: 줄 시작에 "숫자." 다음 "제목 / 작가 (날짜)"
         item_re = re.compile(
             r'^\s*\d+\s*[\.．、]\s*(.+?)\s*[/／]\s*(.+?)\s*\(([^)]+?)\)\s*$')
+        # 섹션 마커 패턴 — '<유료화 작품>', '〈유료화 작품〉', '유료화 작품' 등
+        # < 와 > 는 이미 HTML 디코딩 후 단순 문자.
+        section_re_paid = re.compile(r'유료화\s*작품')
+        section_re_ended = re.compile(r'종료\s*작품')
         for raw_line in plain.split('\n'):
             line = raw_line.strip()
             if not line:
                 continue
-            # 섹션 마커
-            if '유료화' in line and ('작품' in line) and len(line) < 30:
-                kind = 'paid'
-                continue
-            if '종료' in line and ('작품' in line) and len(line) < 30:
-                kind = 'ended'
-                continue
+            # 섹션 마커 — 짧은 라인이면서 마커 패턴 포함 (제한 50자로 완화)
+            if len(line) < 50:
+                if section_re_paid.search(line):
+                    kind = 'paid'
+                    continue
+                if section_re_ended.search(line):
+                    kind = 'ended'
+                    continue
             if kind is None:
                 continue
             m = item_re.match(line)
