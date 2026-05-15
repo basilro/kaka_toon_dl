@@ -170,15 +170,31 @@ class Worker:
                 P.logger.error(traceback.format_exc())
 
         # ---- 다운로드 완료 요약 알림 (받은 게 있을 때만) ----
+        P.logger.info('다운로드 알림 체크: completed_items=%d, url_set=%s, url_len=%d',
+                      len(self.completed_items),
+                      bool(self.notify_download_url),
+                      len(self.notify_download_url or ''))
         if self.completed_items and self.notify_download_url:
             try:
                 msg = build_download_summary(self.completed_items)
+                P.logger.info('다운로드 알림 메시지 빌드: %d바이트', len(msg or ''))
                 if msg:
                     ok = send_webhook(self.notify_download_url, msg)
                     P.logger.info('다운로드 요약 알림 발송: %s (%d건)',
                                   'OK' if ok else 'FAIL', len(self.completed_items))
+                else:
+                    P.logger.warning('다운로드 알림 메시지 빈 — 발송 스킵')
             except Exception as e:
+                import traceback
                 P.logger.warning('다운로드 요약 알림 예외: %s', e)
+                P.logger.warning(traceback.format_exc())
+        elif self.completed_items:
+            P.logger.info('완료 %d건 있으나 알림 URL 미설정 — 발송 안 함',
+                          len(self.completed_items))
+        elif self.notify_download_url:
+            P.logger.info('알림 URL 설정됨이나 신규 다운 0건 — 발송 안 함')
+        else:
+            P.logger.info('완료 0건 + URL 미설정 — 알림 없음')
 
         _auto_set(status='done', finished_at=datetime.now().isoformat(),
                   current_title='', current_phase='', current_episode='',
@@ -607,6 +623,8 @@ class Worker:
                 'episode_title': episode_title,
                 'episode_no': ep_no,
             })
+            P.logger.info('  → completed_items 추가 (현재 누적 %d건)',
+                          len(self.completed_items))
         elif downloaded > 0:
             rec.status = 'partial'
             rec.error_msg = f'failed {len(failed)}/{len(files)}'
