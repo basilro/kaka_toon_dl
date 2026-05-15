@@ -473,11 +473,11 @@ class Worker:
             rec.episode_id = episode_id
             rec.episode_no = ep_no
             rec.episode_title = episode_title
-            rec.group = group
+            rec.dl_group = group
             db.session.add(rec)
             db.session.commit()
         else:
-            rec.group = group
+            rec.dl_group = group
         rec.updated_time = datetime.now()
         rec.ticket_kind = kind
 

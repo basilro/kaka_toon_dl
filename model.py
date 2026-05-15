@@ -29,7 +29,8 @@ class ModelKakaotoonItem(ModelBase):
     ticket_kind = db.Column(db.String)
 
     # 그룹: 'main' (사용자 지정 작품) | 'complete' (공지 기반 완결/유료화 예정)
-    group = db.Column(db.String, index=True)
+    # 컬럼명은 SQL 예약어 회피를 위해 dl_group 사용
+    dl_group = db.Column(db.String, index=True)
 
     # 파일 저장
     save_dir = db.Column(db.String)
@@ -43,4 +44,4 @@ class ModelKakaotoonItem(ModelBase):
         self.status = 'pending'
         self.downloaded_count = 0
         self.total_bytes = 0
-        self.group = 'main'
+        self.dl_group = 'main'

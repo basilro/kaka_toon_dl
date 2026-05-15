@@ -35,6 +35,31 @@ class ModuleBasic(PluginModuleBase):
             'auto_start': 'False',
         }
         self.web_list_model = ModelKakaotoonItem
+        # 기존 DB 에 새 컬럼 자동 추가 (SQLAlchemy 가 alter 안 함)
+        self._migrate_db()
+
+    @staticmethod
+    def _migrate_db():
+        """기존 sqlite DB 에 누락된 컬럼 추가. 신규 설치는 create_all 로 OK."""
+        try:
+            from sqlalchemy import inspect as sa_inspect, text
+            insp = sa_inspect(db.engine)
+            cols = {c['name'] for c in insp.get_columns('kaka_toon_dl_item')}
+            # 필요한 컬럼 → ALTER 문
+            need = []
+            if 'dl_group' not in cols:
+                need.append(('dl_group', 'VARCHAR'))
+            for col, typ in need:
+                stmt = f'ALTER TABLE kaka_toon_dl_item ADD COLUMN {col} {typ}'
+                with db.engine.connect() as conn:
+                    conn.execute(text(stmt))
+                    try:
+                        conn.commit()
+                    except Exception:
+                        pass
+                P.logger.info('[basic] DB migration: %s 추가됨', col)
+        except Exception as e:
+            P.logger.warning('[basic] DB migration 실패 (계속): %s', e)
 
     def process_menu(self, sub, req):
         arg = P.ModelSetting.to_dict()
