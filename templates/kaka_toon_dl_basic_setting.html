@@ -10,6 +10,7 @@
   <nav>
     {{ macros.m_tab_head_start() }}
       {{ macros.m_tab_head('normal', '일반', true) }}
+      {{ macros.m_tab_head('notify', '알림', false) }}
       {{ macros.m_tab_head('auto', '자동', false) }}
     {{ macros.m_tab_head_end() }}
   </nav>
@@ -68,22 +69,28 @@
                   '예) {다운로드경로}/완결/{작품}/{NNNN_회차}/',
                   '※ 작품별 유료화 일자가 지났으면 자동으로 스킵 — 별도 개월 수 설정 불필요']) }}
 
-        <hr style="margin:18px 0;"/>
-        <h5 style="margin-bottom:8px;">웹훅 알림 (선택)</h5>
+        {{ macros.setting_buttons([['globalDbDeleteBtn', '이력 초기화']], 'DB 정리') }}
+      {{ macros.m_tab_content_end() }}
+
+      {{ macros.m_tab_content_start('notify', false) }}
+        <div style="padding:6px 0 14px; color:#666;">
+          웹훅 URL 입력 시에만 알림 발송. <strong>Discord 웹훅</strong>을 기본 대상으로 하며,
+          Slack 웹훅 URL 도 자동 인식합니다. 빈 칸이면 해당 알림은 보내지 않습니다.
+          <br/><small>Discord 웹훅 URL 형식 예: <code>https://discord.com/api/webhooks/{ID}/{TOKEN}</code></small>
+        </div>
 
         {{ macros.setting_input_text_and_buttons('notify_webhook_cookie', '쿠키 만료 알림 URL',
             [['notifyTestCookieBtn', '테스트']],
             value=arg['notify_webhook_cookie'],
             desc=['카카오 쿠키 만료 감지 시 1회 발송 (복구되면 다음 만료 때 다시 1회).',
-                  'Discord 웹훅 URL 권장 (Slack 도 자동 분기). 비우면 알림 OFF.']) }}
+                  '비우면 알림 OFF.']) }}
 
         {{ macros.setting_input_text_and_buttons('notify_webhook_download', '다운로드 완료 알림 URL',
             [['notifyTestDownloadBtn', '테스트']],
             value=arg['notify_webhook_download'],
             desc=['자동 실행이 끝나고 받은 회차가 있을 때 요약 메시지 발송.',
+                  '받은 회차가 없으면 알림 안 보냄.',
                   '비우면 알림 OFF.']) }}
-
-        {{ macros.setting_buttons([['globalDbDeleteBtn', '이력 초기화']], 'DB 정리') }}
       {{ macros.m_tab_content_end() }}
 
       {{ macros.m_tab_content_start('auto', false) }}
