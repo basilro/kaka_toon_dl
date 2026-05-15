@@ -28,6 +28,9 @@ class ModelKakaotoonItem(ModelBase):
     # 사용한 티켓 종류 (free / waitfree / ticket)
     ticket_kind = db.Column(db.String)
 
+    # 그룹: 'main' (사용자 지정 작품) | 'complete' (공지 기반 완결/유료화 예정)
+    group = db.Column(db.String, index=True)
+
     # 파일 저장
     save_dir = db.Column(db.String)
     downloaded_count = db.Column(db.Integer)
@@ -40,3 +43,4 @@ class ModelKakaotoonItem(ModelBase):
         self.status = 'pending'
         self.downloaded_count = 0
         self.total_bytes = 0
+        self.group = 'main'

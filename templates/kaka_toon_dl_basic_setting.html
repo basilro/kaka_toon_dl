@@ -55,6 +55,22 @@
             value=arg['use_owned_ticket'],
             desc='On: 보유한 일반 이용권으로 유료 회차도 다운 (잔량 전부). Off면 유료 회차 스킵.') }}
 
+        <hr style="margin:18px 0;"/>
+        <h5 style="margin-bottom:8px;">유료화/종료 공지 자동 다운로드</h5>
+
+        {{ macros.setting_checkbox('notice_auto_dl', '공지 기반 자동 다운 (유료화/종료 예정 작품)',
+            value=arg['notice_auto_dl'],
+            desc='On: 자동 실행 시 카카오웹툰 공지의 \"YYYY년 M월 유료화 & 종료 작품\" 안내에서 작품 추출 → 무료/보유 회차 자동 다운로드. 별도 스케줄 없이 기존 스케줄에 통합.') }}
+
+        {{ macros.setting_input_text('notice_subdir', '공지 다운 저장 폴더명',
+            value=arg['notice_subdir'],
+            desc=['다운로드 경로 아래 만들어질 하위 폴더 이름. 기본: 완결',
+                  '예) {다운로드경로}/완결/{작품}/{NNNN_회차}/']) }}
+
+        {{ macros.setting_input_text('notice_months', '공지 검사 개월 수',
+            value=arg['notice_months'],
+            desc=['최근 N개월치 유료화/종료 공지를 검사. 기본 2 — 이번달 + 지난달까지 (지난달은 1주 여유기간 동안 수정될 수 있어 같이 체크).']) }}
+
         {{ macros.setting_buttons([['globalDbDeleteBtn', '이력 초기화']], 'DB 정리') }}
       {{ macros.m_tab_content_end() }}
 

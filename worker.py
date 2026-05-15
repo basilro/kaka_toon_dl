@@ -73,6 +73,12 @@ class Worker:
         self.use_waitfree = (self.cfg.get('use_waitfree') or 'True') == 'True'
         self.use_owned_ticket = (self.cfg.get('use_owned_ticket') or 'False') == 'True'
         self.output_format = (self.cfg.get('output_format') or 'webp').lower().strip()
+        self.notice_auto_dl = (self.cfg.get('notice_auto_dl') or 'False') == 'True'
+        self.notice_subdir = (self.cfg.get('notice_subdir') or '완결').strip() or '완결'
+        try:
+            self.notice_months = max(1, int(self.cfg.get('notice_months') or '2'))
+        except Exception:
+            self.notice_months = 2
         self.client: Optional[KakaotoonClient] = None
         self.user_id: Optional[str] = None  # 첫 회차 처리 시 lazy 로드
 
@@ -136,11 +142,132 @@ class Worker:
                 summary['failed'] += 1; _auto_summary_inc('failed')
             _auto_set(titles_done=summary['downloaded'] + summary['skipped'] + summary['failed'])
 
+        # ---- 공지 기반 자동 다운로드 (유료화/종료 작품) ----
+        if self.notice_auto_dl:
+            try:
+                ncount = self._process_notices(summary)
+                P.logger.info('[basic] notice 처리: %d 작품 추가 다운', ncount)
+            except Exception as e:
+                import traceback
+                P.logger.error('notice 처리 예외: %s', e)
+                P.logger.error(traceback.format_exc())
+
         _auto_set(status='done', finished_at=datetime.now().isoformat(),
                   current_title='', current_phase='', current_episode='',
                   message=(f"완료 — 다운 {summary['downloaded']}, 스킵 {summary['skipped']}, "
                            f"실패 {summary['failed']}"))
         return {'ret': 'success', **summary}
+
+    # ---- 공지 처리 ----
+    def _process_notices(self, summary: Dict[str, int]) -> int:
+        """매월 유료화/종료 공지 → 작품 목록 추출 → 무료/보유 회차 다운로드.
+
+        반환: 새로 처리한 작품 수
+        """
+        _auto_set(current_phase='fetch_notice', current_title='[공지 확인]',
+                  current_episode='', current_pages_done=0, current_pages_total=0)
+        try:
+            notices = self.client.get_notice_list(limit=30)
+        except KakaotoonError as e:
+            P.logger.warning('공지 목록 조회 실패: %s', e)
+            return 0
+
+        # 유료화/종료 공지만, 최근 N개월 (메인 페이지가 최신순)
+        paid_notices = [n for n in notices
+                        if '유료화' in (n.get('title') or '')
+                        or '종료' in (n.get('title') or '')]
+        paid_notices = paid_notices[:self.notice_months]
+        if not paid_notices:
+            P.logger.info('유료화/종료 공지 없음')
+            return 0
+
+        # 모든 후보 작품 (title, kind) 수집 — 중복 제거
+        seen_titles: set = set()
+        targets: List[Dict[str, str]] = []
+        for n in paid_notices:
+            items = KakaotoonClient.parse_paid_notice(n.get('content') or '')
+            for it in items:
+                t = it['title']
+                if t in seen_titles:
+                    continue
+                seen_titles.add(t)
+                targets.append(it)
+        P.logger.info('공지에서 추출된 작품: %d개 (paid=%d ended=%d)',
+                      len(targets),
+                      sum(1 for x in targets if x['kind'] == 'paid'),
+                      sum(1 for x in targets if x['kind'] == 'ended'))
+
+        processed = 0
+        for it in targets:
+            title = it['title']
+            _auto_set(current_title=f'[공지] {title}',
+                      current_phase='searching',
+                      current_episode='', current_pages_done=0, current_pages_total=0)
+            try:
+                got = self._process_notice_content(title)
+                if got == 'downloaded':
+                    summary['downloaded'] += 1; _auto_summary_inc('downloaded')
+                    processed += 1
+                elif got == 'skipped':
+                    summary['skipped'] += 1; _auto_summary_inc('skipped')
+                else:
+                    summary['failed'] += 1; _auto_summary_inc('failed')
+            except Exception as e:
+                P.logger.warning('공지 작품 %r 처리 실패: %s', title, e)
+                summary['failed'] += 1; _auto_summary_inc('failed')
+        return processed
+
+    def _process_notice_content(self, title: str) -> str:
+        """공지 작품 1개 — 검색 → free/owned 회차 모두 완결 폴더에 다운."""
+        item = self.client.find_content(title)
+        if not item:
+            P.logger.warning('[공지] %s 검색 매칭 실패', title)
+            return 'failed'
+        content_id = item['id']
+        display = item.get('title') or title
+
+        try:
+            meta = self.client.get_content(content_id)
+            if meta.get('title'):
+                display = meta['title']
+        except KakaotoonError:
+            pass
+
+        _auto_set(current_phase='fetch_episodes', current_title=f'[공지] {display}')
+        try:
+            eps = self.client.get_episodes_all(content_id)
+        except KakaotoonError as e:
+            P.logger.warning('[공지] %s 회차 조회 실패: %s', display, e)
+            return 'failed'
+        if not eps:
+            return 'failed'
+
+        # 무료/보유 회차만 (티켓 차감 없이)
+        unlocked: List[Dict] = []
+        for ep in eps:
+            eid = ep.get('id')
+            if not eid:
+                continue
+            rec = (db.session.query(ModelKakaotoonItem)
+                   .filter_by(episode_id=eid).first())
+            if rec and rec.status == 'completed':
+                continue
+            if KakaotoonClient.episode_availability(ep) in ('free', 'unlocked'):
+                unlocked.append(ep)
+        unlocked.sort(key=KakaotoonClient.episode_no)
+        if not unlocked:
+            P.logger.info('[공지] %s 새로 받을 무료/보유 회차 없음', display)
+            return 'skipped'
+
+        downloaded = 0
+        _auto_set(current_phase='downloading')
+        for ep in unlocked:
+            _auto_set(current_episode=ep.get('title', ''),
+                      current_pages_done=0, current_pages_total=0)
+            if self._download_one(display, content_id, ep,
+                                  kind='free', group='complete') == 'downloaded':
+                downloaded += 1
+        return 'downloaded' if downloaded else 'skipped'
 
     # ---- per item ----
     def _process_item(self, raw: str) -> str:
@@ -273,7 +400,8 @@ class Worker:
 
     # ---- one episode ----
     def _download_one(self, content_title: str, content_id: int,
-                      ep: Dict[str, Any], kind: str = 'free') -> str:
+                      ep: Dict[str, Any], kind: str = 'free',
+                      group: str = 'main') -> str:
         episode_id = ep['id']
         ep_no = KakaotoonClient.episode_no(ep)
         episode_title = ep.get('title', '')
@@ -288,8 +416,11 @@ class Worker:
             rec.episode_id = episode_id
             rec.episode_no = ep_no
             rec.episode_title = episode_title
+            rec.group = group
             db.session.add(rec)
             db.session.commit()
+        else:
+            rec.group = group
         rec.updated_time = datetime.now()
         rec.ticket_kind = kind
 
@@ -334,7 +465,12 @@ class Worker:
         # ---- 저장 경로 ----
         c_folder = _safe_filename(content_title)
         e_folder = f'{ep_no:04d}_{_safe_filename(episode_title)}'
-        save_dir = os.path.join(self.download_root, c_folder, e_folder)
+        if group == 'complete':
+            save_dir = os.path.join(self.download_root,
+                                    _safe_filename(self.notice_subdir),
+                                    c_folder, e_folder)
+        else:
+            save_dir = os.path.join(self.download_root, c_folder, e_folder)
         os.makedirs(save_dir, exist_ok=True)
         rec.save_dir = save_dir
         rec.status = 'downloading'

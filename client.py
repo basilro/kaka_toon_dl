@@ -180,6 +180,73 @@ class KakaotoonClient:
                 continue
         return False
 
+    # ---- 공지 ----
+    def get_notice_list(self, offset: int = 0, limit: int = 30) -> List[Dict]:
+        """공지 목록 (more/notice 페이지의 그것).
+
+        반환: [{id, platform, title, content(HTML)}, ...]
+        title 패턴: 'YYYY년 M월 유료화 & 종료 작품 관련 안내'
+        """
+        s = self._session()
+        s.headers['Referer'] = WEB + '/more/notice'
+        r = s.get(f'{GW}/notification/v1/notice',
+                  params={'offset': offset, 'limit': limit}, timeout=15)
+        body = self._check(self._json(r), r)
+        return body.get('data') or []
+
+    @staticmethod
+    def parse_paid_notice(content_html: str) -> List[Dict[str, str]]:
+        """유료화/종료 공지 본문(HTML)에서 작품 목록 추출.
+
+        패턴 예시 (HTML 태그 제거 후):
+          <유료화 작품>
+          1. 무적자 / 노경찬, 휘, 임준욱 (5월 12일)
+          - 무료회차 범위 : 1화 ~ 10화 / 후기
+          ...
+          <종료 작품>
+          1. 작품명 / 작가 (날짜)
+
+        반환: [{'title': '무적자', 'author': '노경찬, 휘, 임준욱',
+                'date': '5월 12일', 'kind': 'paid'|'ended'}]
+        """
+        import html as _html
+        # <p> <br> 등 → 개행. 나머지 태그는 공백
+        plain = re.sub(r'<\s*(br|p|/p|/div|/li|li)[^>]*>', '\n', content_html or '',
+                       flags=re.IGNORECASE)
+        plain = re.sub(r'<[^>]+>', '', plain)
+        plain = _html.unescape(plain)
+
+        results: List[Dict[str, str]] = []
+        kind = None  # paid / ended
+        # 아이템 패턴: 줄 시작에 "숫자." 다음 "제목 / 작가 (날짜)"
+        item_re = re.compile(
+            r'^\s*\d+\s*[\.．、]\s*(.+?)\s*[/／]\s*(.+?)\s*\(([^)]+?)\)\s*$')
+        for raw_line in plain.split('\n'):
+            line = raw_line.strip()
+            if not line:
+                continue
+            # 섹션 마커
+            if '유료화' in line and ('작품' in line) and len(line) < 30:
+                kind = 'paid'
+                continue
+            if '종료' in line and ('작품' in line) and len(line) < 30:
+                kind = 'ended'
+                continue
+            if kind is None:
+                continue
+            m = item_re.match(line)
+            if not m:
+                continue
+            title = m.group(1).strip()
+            author = m.group(2).strip()
+            date = m.group(3).strip()
+            # 너무 짧거나 부적합한 항목 거름
+            if len(title) < 1 or len(title) > 80:
+                continue
+            results.append({'title': title, 'author': author,
+                            'date': date, 'kind': kind})
+        return results
+
     # ---- 검색 / 메타 ----
     def search_content(self, keyword: str, limit: int = 30, offset: int = 0) -> List[Dict]:
         s = self._session()
