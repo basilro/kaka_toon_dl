@@ -29,6 +29,9 @@ class ModuleBasic(PluginModuleBase):
             'output_format': 'webp',
             'notice_auto_dl': 'False',         # 매월 유료화/종료 공지 자동 다운
             'notice_subdir': '완결',            # 저장될 하위 폴더명
+            'notify_webhook_cookie': '',       # 쿠키 만료 시 발송할 웹훅
+            'notify_webhook_download': '',     # 다운로드 완료 요약 발송 웹훅
+            'cookie_expired_notified': 'False',# 쿠키 만료 알림 1회 발송 플래그
             'auto_start': 'False',
         }
         self.web_list_model = ModelKakaotoonItem
@@ -83,6 +86,20 @@ class ModuleBasic(PluginModuleBase):
                     'auto': auto_worker.get_auto_state(),
                     'manual': manual_worker.get_state(),
                 }
+            elif command == 'notify_test':
+                # arg1 = 'cookie' | 'download'
+                from .notify import send_webhook
+                kind = (arg1 or 'cookie').strip().lower()
+                url_key = ('notify_webhook_cookie' if kind == 'cookie'
+                           else 'notify_webhook_download')
+                url = (P.ModelSetting.get(url_key) or '').strip()
+                if not url:
+                    ret = {'ret': 'fail', 'msg': f'{kind} URL 미설정'}
+                else:
+                    msg = f'[카카오웹툰] 테스트 알림 ({kind}) — 정상 수신 확인용'
+                    ok = send_webhook(url, msg)
+                    ret = {'ret': 'success' if ok else 'fail',
+                           'msg': '발송 성공' if ok else '발송 실패 (URL/형식 확인)'}
             elif command == 'db_delete_items':
                 ids = []
                 for x in (arg1 or '').split(','):

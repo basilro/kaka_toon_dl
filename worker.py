@@ -8,6 +8,8 @@ from typing import List, Optional, Dict, Any, Tuple
 from .client import (KakaotoonClient, KakaotoonError,
                      AuthRequiredError, NotReadableError)
 from .model import ModelKakaotoonItem
+from .notify import (send_webhook, build_download_summary,
+                     build_cookie_expired_message)
 from .setup import *  # P, db, logger
 
 
@@ -75,8 +77,11 @@ class Worker:
         self.output_format = (self.cfg.get('output_format') or 'webp').lower().strip()
         self.notice_auto_dl = (self.cfg.get('notice_auto_dl') or 'False') == 'True'
         self.notice_subdir = (self.cfg.get('notice_subdir') or '완결').strip() or '완결'
+        self.notify_cookie_url = (self.cfg.get('notify_webhook_cookie') or '').strip()
+        self.notify_download_url = (self.cfg.get('notify_webhook_download') or '').strip()
         self.client: Optional[KakaotoonClient] = None
         self.user_id: Optional[str] = None  # 첫 회차 처리 시 lazy 로드
+        self.completed_items: List[Dict[str, Any]] = []  # 알림용 누적
 
     @staticmethod
     def _split_items(raw: str) -> List[str]:
@@ -117,7 +122,23 @@ class Worker:
         if not self.client.verify():
             _auto_set(status='error', finished_at=datetime.now().isoformat(),
                       message='쿠키 만료 — 재주입 필요')
+            # 만료 알림 — 1회만 발송 (스팸 방지)
+            try:
+                already = (P.ModelSetting.get('cookie_expired_notified') or 'False') == 'True'
+                if not already and self.notify_cookie_url:
+                    if send_webhook(self.notify_cookie_url,
+                                    build_cookie_expired_message()):
+                        P.ModelSetting.set('cookie_expired_notified', 'True')
+            except Exception as e:
+                P.logger.warning('쿠키 만료 알림 발송 실패: %s', e)
             return {'ret': 'fail', 'reason': 'cookie_expired'}
+
+        # 정상 verify → 만료 플래그 리셋 (다음 만료 때 다시 1회 알림 가능)
+        try:
+            if (P.ModelSetting.get('cookie_expired_notified') or 'False') == 'True':
+                P.ModelSetting.set('cookie_expired_notified', 'False')
+        except Exception:
+            pass
 
         summary = {'titles': len(self.items), 'downloaded': 0, 'skipped': 0, 'failed': 0}
         for raw in self.items:
@@ -147,6 +168,17 @@ class Worker:
                 import traceback
                 P.logger.error('notice 처리 예외: %s', e)
                 P.logger.error(traceback.format_exc())
+
+        # ---- 다운로드 완료 요약 알림 (받은 게 있을 때만) ----
+        if self.completed_items and self.notify_download_url:
+            try:
+                msg = build_download_summary(self.completed_items)
+                if msg:
+                    ok = send_webhook(self.notify_download_url, msg)
+                    P.logger.info('다운로드 요약 알림 발송: %s (%d건)',
+                                  'OK' if ok else 'FAIL', len(self.completed_items))
+            except Exception as e:
+                P.logger.warning('다운로드 요약 알림 예외: %s', e)
 
         _auto_set(status='done', finished_at=datetime.now().isoformat(),
                   current_title='', current_phase='', current_episode='',
@@ -556,6 +588,12 @@ class Worker:
             rec.status = 'completed'
             P.logger.info('[%s] %s 다운로드 완료 (%d개, %.1fKB)',
                           content_title, episode_title, downloaded, total_bytes / 1024)
+            self.completed_items.append({
+                'group': group,
+                'content_title': content_title,
+                'episode_title': episode_title,
+                'episode_no': ep_no,
+            })
         elif downloaded > 0:
             rec.status = 'partial'
             rec.error_msg = f'failed {len(failed)}/{len(files)}'
