@@ -220,46 +220,45 @@ class Worker:
             P.logger.warning('공지 목록 조회 실패: %s', e)
             return 0
 
-        P.logger.info('공지 응답 %d개', len(notices))
-        # 상위 5개 제목 미리보기 (디버깅용)
-        for n in notices[:5]:
-            P.logger.info('  - id=%s, title=%r', n.get('id'), n.get('title'))
-
-        paid_notices = [n for n in notices
-                        if '유료화' in (n.get('title') or '')
-                        or '종료' in (n.get('title') or '')]
-        P.logger.info('유료화/종료 매칭 공지: %d개', len(paid_notices))
-        if not paid_notices:
-            P.logger.info('유료화/종료 공지 없음')
+        # 매월 유료화/종료 공지는 하나 — 최근 매칭된 1개만 사용
+        paid_notice = None
+        for n in notices:
+            title = n.get('title') or ''
+            if '유료화' in title or '종료' in title:
+                paid_notice = n
+                break
+        if paid_notice is None:
+            P.logger.info('유료화/종료 공지 없음 (공지 응답 %d개 중)', len(notices))
             return 0
+
+        year = self._extract_notice_year(paid_notice.get('title') or '')
+        content = paid_notice.get('content') or ''
+        items = KakaotoonClient.parse_paid_notice(content)
+        P.logger.info('대상 공지: id=%s title=%r (본문 %dB, 파싱 %d개)',
+                      paid_notice.get('id'), paid_notice.get('title'),
+                      len(content), len(items))
+        if not items and content:
+            # 파싱 0개일 때 진단용 본문 미리보기
+            preview = re.sub(r'<[^>]+>', ' ', content[:600])
+            preview = re.sub(r'\s+', ' ', preview).strip()
+            P.logger.info('  [파싱실패 진단] 본문 미리보기: %s', preview[:300])
 
         today = date.today()
         seen_titles: set = set()
         targets: List[Dict[str, str]] = []
         skipped_past = 0
-        for n in paid_notices:
-            year = self._extract_notice_year(n.get('title') or '')
-            content = n.get('content') or ''
-            items = KakaotoonClient.parse_paid_notice(content)
-            P.logger.info('  공지 id=%s title=%r → 본문 %dB, 파싱 %d개',
-                          n.get('id'), n.get('title'), len(content), len(items))
-            if not items and content:
-                # 본문은 있는데 파싱이 0 → 처음 300자 미리보기 (한 번만 진단용)
-                preview = re.sub(r'<[^>]+>', ' ', content[:600])
-                preview = re.sub(r'\s+', ' ', preview).strip()
-                P.logger.info('    [파싱실패 진단] 본문 미리보기: %s', preview[:300])
-            for it in items:
-                t = it['title']
-                if t in seen_titles:
-                    continue
-                paid_dt = self._parse_item_date(year, it.get('date', ''))
-                if paid_dt is not None and paid_dt < today:
-                    skipped_past += 1
-                    continue
-                seen_titles.add(t)
-                it['_paid_date'] = paid_dt.isoformat() if paid_dt else ''
-                it['_year'] = year
-                targets.append(it)
+        for it in items:
+            t = it['title']
+            if t in seen_titles:
+                continue
+            paid_dt = self._parse_item_date(year, it.get('date', ''))
+            if paid_dt is not None and paid_dt < today:
+                skipped_past += 1
+                continue
+            seen_titles.add(t)
+            it['_paid_date'] = paid_dt.isoformat() if paid_dt else ''
+            it['_year'] = year
+            targets.append(it)
         P.logger.info('공지 추출 작품: %d개 (paid=%d ended=%d, 과거날짜 스킵=%d)',
                       len(targets),
                       sum(1 for x in targets if x['kind'] == 'paid'),
