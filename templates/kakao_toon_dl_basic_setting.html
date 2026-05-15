@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div>
+  {{ macros.m_button_group([['globalSettingSaveBtn', '설정 저장'],
+                            ['globalImmediatelyExecuteBtn', '즉시 실행'],
+                            ['verifyCookiesBtn', '쿠키 검증']]) }}
+  {{ macros.m_row_start('5') }}
+  {{ macros.m_row_end() }}
+  <nav>
+    {{ macros.m_tab_head_start() }}
+      {{ macros.m_tab_head('normal', '일반', true) }}
+      {{ macros.m_tab_head('auto', '자동', false) }}
+    {{ macros.m_tab_head_end() }}
+  </nav>
+  <form id='setting' name='setting'>
+    <div class="tab-content" id="nav-tabContent">
+      {{ macros.m_tab_content_start('normal', true) }}
+        {{ macros.setting_input_textarea('titles', '체크할 웹툰',
+            value=arg['titles'], row='5',
+            desc=['한 줄에 하나씩 (또는 | 로 구분).',
+                  '입력 형태 자유: 작품 제목 / 전체 URL / 숫자(contentId) 모두 가능.',
+                  '예) 홍도',
+                  '예) https://webtoon.kakao.com/content/홍도/1121',
+                  '예) 1121']) }}
+
+        {{ macros.setting_input_textarea('cookies_json', '카카오 쿠키 (Cookie-Editor JSON)',
+            value=arg['cookies_json'], row='6',
+            desc=['Chrome 확장 Cookie-Editor 등으로 webtoon.kakao.com 쿠키를 JSON으로 export 후 그대로 붙여넣기',
+                  '필수 쿠키: _kau (카카오 통합 로그인)',
+                  '쿠키 만료 시 다시 export해서 주입']) }}
+
+        {{ macros.setting_input_text_and_buttons('download_path', '다운로드 경로',
+            [['select_download_path_btn', '경로 선택']],
+            value=arg['download_path'],
+            desc=['{다운로드경로}/{작품제목}/{NNNN_회차제목}/{001.webp ...} 형태로 저장됨',
+                  '※ AES-CBC 복호화 성공 시 .webp, 실패 시 원본 .webp.cef + _keys.json 저장']) }}
+
+        {{ macros.setting_input_text('max_per_run', '기다무 1회 실행 최대 사용 장수',
+            value=arg['max_per_run'],
+            desc=['기다무(자동 충전) 무료 티켓 사용 한도. 보통 1장씩 충전되므로 1.']) }}
+
+        {{ macros.setting_checkbox('use_waitfree', '기다무 무료 티켓 사용',
+            value=arg['use_waitfree'],
+            desc='On: 충전된 기다무 티켓을 사용해서 잠금 회차 다운.') }}
+
+        {{ macros.setting_checkbox('use_owned_ticket', '보유 일반 티켓 사용',
+            value=arg['use_owned_ticket'],
+            desc='On: 보유한 일반 이용권으로 유료 회차도 다운 (잔량 전부). Off면 유료 회차 스킵.') }}
+
+        {{ macros.setting_buttons([['globalDbDeleteBtn', '이력 초기화']], 'DB 정리') }}
+      {{ macros.m_tab_content_end() }}
+
+      {{ macros.m_tab_content_start('auto', false) }}
+        {{ macros.global_setting_scheduler_button(arg['is_include'], arg['is_running']) }}
+        {{ macros.setting_input_text('basic_interval', '스케쥴링 실행 정보',
+            value=arg['basic_interval'], col='3',
+            desc=['Interval(minute) 또는 Cron. 예: 180 또는 0 */3 * * *']) }}
+        {{ macros.setting_checkbox('basic_auto_start', '시작시 자동실행',
+            value=arg['basic_auto_start'], desc='On: 시작시 스케쥴러 자동 등록') }}
+      {{ macros.m_tab_content_end() }}
+    </div>
+  </form>
+</div>
+
+<script type="text/javascript">
+var package_name = "{{ arg['package_name'] }}";
+
+$(document).ready(function(){});
+
+$('body').on('click', '#select_download_path_btn', function(e){
+  e.preventDefault();
+  var path = $('#download_path').val().trim() || '/';
+  globalSelectLocalFolder('다운로드 폴더', path, function(result){
+    $('#download_path').val(result);
+  });
+});
+
+$('body').on('click', '#verifyCookiesBtn', function(e){
+  e.preventDefault();
+  $.post('/' + package_name + '/ajax/basic/command',
+         {command: 'verify_cookies'},
+         function(data){
+    if(data.ret === 'success'){ $.notify(data.msg || '쿠키 유효', {className: 'success'}); }
+    else { $.notify(data.msg || '쿠키 검증 실패', {className: 'error'}); }
+  });
+});
+</script>
+{% endblock %}

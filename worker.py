@@ -1,0 +1,393 @@
+"""스케줄 1회 실행 단위 — 작품 리스트를 돌면서 다운로드 시도."""
+import os
+import re
+import threading
+from datetime import datetime
+from typing import List, Optional, Dict, Any, Tuple
+
+from .client import (KakaotoonClient, KakaotoonError,
+                     AuthRequiredError, NotReadableError)
+from .model import ModelKakaotoonItem
+from .setup import *  # P, db, logger
+
+
+def _safe_filename(s: str) -> str:
+    s = re.sub(r'[\\/*?:"<>|]', '_', s or '')
+    return s.strip().strip('.')
+
+
+# ---- 자동 다운로드 진행 상태 (싱글톤) ----
+_auto_state_lock = threading.Lock()
+_auto_state: Dict[str, Any] = {
+    'status': 'idle',
+    'started_at': None,
+    'finished_at': None,
+    'message': '',
+    'titles_total': 0,
+    'titles_done': 0,
+    'current_title': '',
+    'current_phase': '',
+    'current_episode': '',
+    'current_pages_done': 0,
+    'current_pages_total': 0,
+    'summary': {'downloaded': 0, 'skipped': 0, 'failed': 0},
+}
+
+
+def get_auto_state() -> Dict[str, Any]:
+    with _auto_state_lock:
+        snap = dict(_auto_state)
+        snap['summary'] = dict(_auto_state['summary'])
+        return snap
+
+
+def _auto_set(**kw):
+    with _auto_state_lock:
+        _auto_state.update(kw)
+
+
+def _auto_reset():
+    with _auto_state_lock:
+        _auto_state.update({
+            'status': 'idle', 'started_at': None, 'finished_at': None,
+            'message': '', 'titles_total': 0, 'titles_done': 0,
+            'current_title': '', 'current_phase': '',
+            'current_episode': '', 'current_pages_done': 0, 'current_pages_total': 0,
+            'summary': {'downloaded': 0, 'skipped': 0, 'failed': 0},
+        })
+
+
+def _auto_summary_inc(key: str, delta: int = 1):
+    with _auto_state_lock:
+        _auto_state['summary'][key] = _auto_state['summary'].get(key, 0) + delta
+
+
+class Worker:
+
+    def __init__(self):
+        self.cfg = P.ModelSetting.to_dict()
+        self.download_root = (self.cfg.get('download_path') or '').strip()
+        self.cookies_json = (self.cfg.get('cookies_json') or '').strip()
+        self.items: List[str] = self._split_items(self.cfg.get('titles') or '')
+        self.max_per_run = int(self.cfg.get('max_per_run') or '1')
+        self.use_waitfree = (self.cfg.get('use_waitfree') or 'True') == 'True'
+        self.use_owned_ticket = (self.cfg.get('use_owned_ticket') or 'False') == 'True'
+        self.client: Optional[KakaotoonClient] = None
+
+    @staticmethod
+    def _split_items(raw: str) -> List[str]:
+        out = []
+        for chunk in (raw or '').replace('\r', '').replace('|', '\n').split('\n'):
+            s = chunk.strip()
+            if s:
+                out.append(s)
+        return out
+
+    # ---- public ----
+    def run(self) -> dict:
+        P.logger.info('[basic] Worker.run BEGIN items=%s use_waitfree=%s use_owned_ticket=%s max_per_run=%s',
+                      self.items, self.use_waitfree, self.use_owned_ticket, self.max_per_run)
+        _auto_reset()
+        _auto_set(status='running', started_at=datetime.now().isoformat(),
+                  message='시작', titles_total=len(self.items))
+        if not self.download_root:
+            _auto_set(status='error', finished_at=datetime.now().isoformat(),
+                      message='download_path 미설정')
+            return {'ret': 'fail', 'reason': 'no_download_path'}
+        if not self.cookies_json:
+            _auto_set(status='error', finished_at=datetime.now().isoformat(),
+                      message='cookies_json 미설정')
+            return {'ret': 'fail', 'reason': 'no_cookies'}
+        if not self.items:
+            _auto_set(status='error', finished_at=datetime.now().isoformat(),
+                      message='체크할 작품 미설정')
+            return {'ret': 'fail', 'reason': 'no_titles'}
+
+        try:
+            self.client = KakaotoonClient(self.cookies_json, logger=P.logger)
+        except AuthRequiredError as e:
+            _auto_set(status='error', finished_at=datetime.now().isoformat(),
+                      message=f'쿠키 인증 실패: {e}')
+            return {'ret': 'fail', 'reason': 'auth', 'msg': str(e)}
+
+        if not self.client.verify():
+            _auto_set(status='error', finished_at=datetime.now().isoformat(),
+                      message='쿠키 만료 — 재주입 필요')
+            return {'ret': 'fail', 'reason': 'cookie_expired'}
+
+        summary = {'titles': len(self.items), 'downloaded': 0, 'skipped': 0, 'failed': 0}
+        for raw in self.items:
+            _auto_set(current_title=raw, current_phase='searching',
+                      current_episode='', current_pages_done=0, current_pages_total=0)
+            try:
+                got = self._process_item(raw)
+                if got == 'downloaded':
+                    summary['downloaded'] += 1; _auto_summary_inc('downloaded')
+                elif got == 'skipped':
+                    summary['skipped'] += 1; _auto_summary_inc('skipped')
+                else:
+                    summary['failed'] += 1; _auto_summary_inc('failed')
+            except Exception as e:
+                import traceback
+                P.logger.error('process item %r exception: %s', raw, e)
+                P.logger.error(traceback.format_exc())
+                summary['failed'] += 1; _auto_summary_inc('failed')
+            _auto_set(titles_done=summary['downloaded'] + summary['skipped'] + summary['failed'])
+
+        _auto_set(status='done', finished_at=datetime.now().isoformat(),
+                  current_title='', current_phase='', current_episode='',
+                  message=(f"완료 — 다운 {summary['downloaded']}, 스킵 {summary['skipped']}, "
+                           f"실패 {summary['failed']}"))
+        return {'ret': 'success', **summary}
+
+    # ---- per item ----
+    def _process_item(self, raw: str) -> str:
+        cid = KakaotoonClient.extract_content_id(raw)
+        if cid:
+            content_id = cid
+            display = raw
+            P.logger.info('[%s] content_id 직접: %s', raw, content_id)
+        else:
+            it = self.client.find_content(raw)
+            if not it:
+                P.logger.warning('[%s] 검색 실패', raw)
+                return 'failed'
+            content_id = it['id']
+            display = it.get('title') or raw
+            P.logger.info('[%s] 검색→ content_id=%s title=%r', raw, content_id, display)
+
+        return self._process_content(display, content_id)
+
+    def _process_content(self, title: str, content_id: int) -> str:
+        _auto_set(current_phase='fetch_episodes')
+        try:
+            meta = self.client.get_content(content_id)
+            if meta.get('title'):
+                title = meta['title']
+                _auto_set(current_title=title)
+        except KakaotoonError as e:
+            P.logger.warning('[%s] content meta 실패 (계속): %s', title, e)
+
+        try:
+            eps = self.client.get_episodes_all(content_id)
+        except KakaotoonError as e:
+            P.logger.error('[%s] 회차 조회 실패: %s', title, e)
+            return 'failed'
+        if not eps:
+            P.logger.warning('[%s] 회차 없음', title)
+            return 'failed'
+
+        # 분류
+        unlocked: List[Dict] = []        # 무료/소장 (그냥 pass)
+        waitfree_eps: List[Dict] = []    # 기다무 대기 (티켓 충전되면)
+        pay_eps: List[Dict] = []         # 유료 회차
+
+        for ep in eps:
+            eid = ep.get('id')
+            if not eid:
+                continue
+            rec = db.session.query(ModelKakaotoonItem).filter_by(episode_id=eid).first()
+            if rec and rec.status == 'completed':
+                continue
+            avail = KakaotoonClient.episode_availability(ep)
+            if avail in ('free', 'unlocked'):
+                unlocked.append(ep)
+            elif avail == 'waitfree':
+                waitfree_eps.append(ep)
+            elif avail == 'pay':
+                pay_eps.append(ep)
+        unlocked.sort(key=KakaotoonClient.episode_no)
+        waitfree_eps.sort(key=KakaotoonClient.episode_no)
+        pay_eps.sort(key=KakaotoonClient.episode_no)
+        P.logger.info('[%s] 미수신 — 무료/소장 %d개, 기다무대기 %d개, 유료 %d개',
+                      title, len(unlocked), len(waitfree_eps), len(pay_eps))
+
+        downloaded_count = 0
+        _auto_set(current_phase='downloading')
+
+        # 1) 무료/소장 — 제한 없이
+        for ep in unlocked:
+            _auto_set(current_episode=ep.get('title', ''),
+                      current_pages_done=0, current_pages_total=0)
+            if self._download_one(title, content_id, ep, kind='free') == 'downloaded':
+                downloaded_count += 1
+
+        # 2) 기다무 대기 회차 — 티켓 자동 충전 후 사용
+        wf_used = 0
+        if waitfree_eps and self.use_waitfree:
+            for ep in waitfree_eps:
+                if wf_used >= self.max_per_run:
+                    P.logger.info('[%s] 기다무 max_per_run(%d) 도달 — 중단',
+                                  title, self.max_per_run)
+                    break
+                _auto_set(current_phase='check_ticket',
+                          current_episode=ep.get('title', ''))
+                # 충전 시도 → 사용 가능한 무료 티켓 있으면 totalTicketCount 증가
+                try:
+                    self.client.check_and_receive_free_tickets(content_id)
+                except KakaotoonError as e:
+                    P.logger.info('[%s] free ticket 수령 실패 (계속): %s', title, e)
+                # 잔량 확인
+                try:
+                    av = self.client.get_available_tickets(content_id)
+                except KakaotoonError as e:
+                    P.logger.warning('[%s] available-tickets 실패: %s', title, e)
+                    break
+                tc = int(av.get('ticketCount') or 0)
+                if tc <= 0:
+                    P.logger.info('[%s] 사용 가능 티켓 0 — 기다무 다운 종료', title)
+                    break
+
+                _auto_set(current_phase='downloading')
+                if self._download_one(title, content_id, ep, kind='waitfree') == 'downloaded':
+                    downloaded_count += 1
+                    wf_used += 1
+                else:
+                    P.logger.info('[%s] 기다무 회차 다운 실패 — 종료', title)
+                    break
+        elif waitfree_eps:
+            P.logger.info('[%s] 기다무 사용 Off — %d개 스킵', title, len(waitfree_eps))
+
+        # 3) 유료 회차 — 보유 티켓으로만 (옵션 On일 때)
+        if pay_eps and self.use_owned_ticket:
+            for ep in pay_eps:
+                try:
+                    av = self.client.get_available_tickets(content_id)
+                except KakaotoonError as e:
+                    P.logger.warning('[%s] available-tickets 실패: %s', title, e)
+                    break
+                if int(av.get('ticketCount') or 0) <= 0:
+                    P.logger.info('[%s] 일반 티켓 잔량 0 — 유료 회차 다운 종료', title)
+                    break
+                _auto_set(current_phase='downloading',
+                          current_episode=ep.get('title', ''))
+                if self._download_one(title, content_id, ep, kind='ticket') == 'downloaded':
+                    downloaded_count += 1
+                else:
+                    P.logger.info('[%s] 유료 회차 다운 실패 — 종료', title)
+                    break
+
+        return 'downloaded' if downloaded_count else 'skipped'
+
+    # ---- one episode ----
+    def _download_one(self, content_title: str, content_id: int,
+                      ep: Dict[str, Any], kind: str = 'free') -> str:
+        episode_id = ep['id']
+        ep_no = KakaotoonClient.episode_no(ep)
+        episode_title = ep.get('title', '')
+
+        rec = db.session.query(ModelKakaotoonItem).filter_by(episode_id=episode_id).first()
+        if rec and rec.status == 'completed':
+            return 'skipped'
+        if rec is None:
+            rec = ModelKakaotoonItem()
+            rec.content_id = content_id
+            rec.content_title = content_title
+            rec.episode_id = episode_id
+            rec.episode_no = ep_no
+            rec.episode_title = episode_title
+            db.session.add(rec)
+            db.session.commit()
+        rec.updated_time = datetime.now()
+        rec.ticket_kind = kind
+
+        # ---- pass (티켓 차감 / 열람 등록) ----
+        if kind != 'free':
+            rec.status = 'using_ticket'; db.session.commit()
+            try:
+                self.client.pass_episode(episode_id)
+            except NotReadableError as e:
+                rec.status = 'skipped_no_ticket'; rec.error_msg = str(e)
+                db.session.commit(); return 'skipped'
+            except KakaotoonError as e:
+                rec.status = 'failed'; rec.error_msg = f'pass: {e}'
+                db.session.commit(); return 'failed'
+        else:
+            # 무료도 pass 한 번 호출해두면 history 마킹됨 — 실패해도 무시
+            try:
+                self.client.pass_episode(episode_id)
+            except Exception as e:
+                P.logger.info('[%s] %s 무료 pass (무시): %s',
+                              content_title, episode_title, e)
+
+        # ---- media-resources ----
+        try:
+            mr = self.client.get_media_resources(episode_id)
+        except KakaotoonError as e:
+            rec.status = 'failed'; rec.error_msg = f'media-resources: {e}'
+            db.session.commit(); return 'failed'
+        media = mr.get('media') or {}
+        files = media.get('files') or []
+        aid = media.get('aid'); zid = media.get('zid')
+        if not files:
+            rec.status = 'failed'; rec.error_msg = 'no media files'
+            db.session.commit(); return 'failed'
+
+        # ---- 저장 경로 ----
+        c_folder = _safe_filename(content_title)
+        e_folder = f'{ep_no:04d}_{_safe_filename(episode_title)}'
+        save_dir = os.path.join(self.download_root, c_folder, e_folder)
+        os.makedirs(save_dir, exist_ok=True)
+        rec.save_dir = save_dir
+        rec.status = 'downloading'
+        rec.page_count = len(files)
+        db.session.commit()
+        _auto_set(current_pages_total=len(files), current_pages_done=0)
+
+        downloaded = 0; total_bytes = 0; failed: List[Tuple[int, str]] = []
+        for i, f in enumerate(files, start=1):
+            url = f.get('url')
+            try:
+                enc = self.client.download_image(url)
+                try:
+                    dec = KakaotoonClient.decrypt_cef(enc, aid, zid) if (aid and zid) else None
+                except KakaotoonError as e:
+                    dec = None
+                    P.logger.warning('[%s] %s page %d 복호화 실패: %s — .cef 원본만 저장',
+                                     content_title, episode_title, i, e)
+                if dec is not None:
+                    ext = '.webp'
+                    if dec[:3] == b'\xff\xd8\xff':
+                        ext = '.jpg'
+                    elif dec[:8] == b'\x89PNG\r\n\x1a\n':
+                        ext = '.png'
+                    local = os.path.join(save_dir, f'{i:03d}{ext}')
+                    with open(local, 'wb') as fp:
+                        fp.write(dec)
+                    total_bytes += len(dec)
+                else:
+                    local = os.path.join(save_dir, f'{i:03d}.webp.cef')
+                    with open(local, 'wb') as fp:
+                        fp.write(enc)
+                    total_bytes += len(enc)
+                downloaded += 1
+                _auto_set(current_pages_done=downloaded)
+            except Exception as e:
+                failed.append((i, str(e)))
+                P.logger.warning('[%s] %s page %d 실패: %s',
+                                 content_title, episode_title, i, e)
+
+        # 복호화 실패 케이스 디버깅용으로 aid/zid 저장 (decryption tried but failed)
+        if aid and zid:
+            try:
+                with open(os.path.join(save_dir, '_keys.json'), 'w', encoding='utf-8') as fp:
+                    fp.write(f'{{"aid": "{aid}", "zid": "{zid}"}}\n')
+            except Exception:
+                pass
+
+        rec.downloaded_count = downloaded
+        rec.total_bytes = total_bytes
+        rec.downloaded_at = datetime.now()
+        rec.updated_time = rec.downloaded_at
+        if downloaded == len(files):
+            rec.status = 'completed'
+            P.logger.info('[%s] %s 다운로드 완료 (%d개, %.1fKB)',
+                          content_title, episode_title, downloaded, total_bytes / 1024)
+        elif downloaded > 0:
+            rec.status = 'partial'
+            rec.error_msg = f'failed {len(failed)}/{len(files)}'
+        else:
+            rec.status = 'failed'
+            rec.error_msg = f'all failed ({len(files)})'
+        db.session.commit()
+        return 'downloaded' if rec.status in ('completed', 'partial') else 'failed'
