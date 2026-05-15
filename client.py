@@ -150,21 +150,35 @@ class KakaotoonClient:
 
     # ---- 로그인 확인 ----
     def verify(self) -> bool:
-        """쿠키 유효성 빠른 체크. /gift/v1/check-and-receive-free-tickets 같은
-        로그인 필수 엔드포인트로 검증해도 되지만, 회차 목록(공개) 호출이 더 가벼움.
-        실제 검증은 인기 컨텐츠(id=1) 등으로.
+        """쿠키가 로그인 세션으로 유효한지 확인.
+
+        `/popularity/v1/my-review?episodeId=X` 응답의 userId 필드 존재 여부로
+        판정. 안정적으로 존재하는 free 회차 후보 여러 개 순차 시도 — 하나라도
+        userId 가 잡히면 OK.
         """
-        try:
-            # 공개 검색이라도 200 떨어지면 게이트웨이 동작 OK. 로그인까지 검증은
-            # tickets API로.
-            s = self._session()
-            r = s.get(f'{GW}/ticket/v2/views/content-home/available-tickets',
-                      params={'contentId': 1}, timeout=10)
-            if r.status_code in (401, 403):
-                return False
-            return r.status_code == 200
-        except Exception:
-            return False
+        s = self._session()
+        candidates = (189606, 26737, 26638)  # 인기작 안정 회차 ID
+        for eid in candidates:
+            try:
+                r = s.get(f'{GW}/popularity/v1/my-review',
+                          params={'episodeId': eid}, timeout=10)
+                if r.status_code in (401, 403):
+                    self._log('info', 'verify ep=%s → %d (auth fail)',
+                              eid, r.status_code)
+                    return False
+                if r.status_code != 200:
+                    self._log('info', 'verify ep=%s → %d, 다음 후보 시도',
+                              eid, r.status_code)
+                    continue
+                body = r.json()
+                uid = (body.get('data') or {}).get('userId')
+                if uid:
+                    self._log('info', 'verify OK (ep=%s, userId=%s)', eid, uid)
+                    return True
+            except Exception as e:
+                self._log('info', 'verify ep=%s 예외: %s', eid, e)
+                continue
+        return False
 
     # ---- 검색 / 메타 ----
     def search_content(self, keyword: str, limit: int = 30, offset: int = 0) -> List[Dict]:
