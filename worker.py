@@ -2,7 +2,7 @@
 import os
 import re
 import threading
-from datetime import datetime
+from datetime import datetime, date
 from typing import List, Optional, Dict, Any, Tuple
 
 from .client import (KakaotoonClient, KakaotoonError,
@@ -75,10 +75,6 @@ class Worker:
         self.output_format = (self.cfg.get('output_format') or 'webp').lower().strip()
         self.notice_auto_dl = (self.cfg.get('notice_auto_dl') or 'False') == 'True'
         self.notice_subdir = (self.cfg.get('notice_subdir') or '완결').strip() or '완결'
-        try:
-            self.notice_months = max(1, int(self.cfg.get('notice_months') or '2'))
-        except Exception:
-            self.notice_months = 2
         self.client: Optional[KakaotoonClient] = None
         self.user_id: Optional[str] = None  # 첫 회차 처리 시 lazy 로드
 
@@ -159,10 +155,30 @@ class Worker:
         return {'ret': 'success', **summary}
 
     # ---- 공지 처리 ----
-    def _process_notices(self, summary: Dict[str, int]) -> int:
-        """매월 유료화/종료 공지 → 작품 목록 추출 → 무료/보유 회차 다운로드.
+    @staticmethod
+    def _extract_notice_year(title: str) -> int:
+        m = re.search(r'(\d{4})\s*년', title or '')
+        if m:
+            return int(m.group(1))
+        return date.today().year
 
-        반환: 새로 처리한 작품 수
+    @staticmethod
+    def _parse_item_date(year: int, date_str: str) -> Optional[date]:
+        if not date_str:
+            return None
+        m = re.search(r'(\d+)\s*월\s*(\d+)\s*일', date_str)
+        if not m:
+            return None
+        try:
+            return date(year, int(m.group(1)), int(m.group(2)))
+        except Exception:
+            return None
+
+    def _process_notices(self, summary: Dict[str, int]) -> int:
+        """유료화/종료 공지 → 작품 목록 추출 → 무료/보유 회차 다운로드.
+
+        작품별 (M월 N일) 일자가 오늘보다 과거면 자동 스킵 (이미 유료화돼서
+        무료로 받을 수 없음).
         """
         _auto_set(current_phase='fetch_notice', current_title='[공지 확인]',
                   current_episode='', current_pages_done=0, current_pages_total=0)
@@ -172,30 +188,39 @@ class Worker:
             P.logger.warning('공지 목록 조회 실패: %s', e)
             return 0
 
-        # 유료화/종료 공지만, 최근 N개월 (메인 페이지가 최신순)
         paid_notices = [n for n in notices
                         if '유료화' in (n.get('title') or '')
                         or '종료' in (n.get('title') or '')]
-        paid_notices = paid_notices[:self.notice_months]
         if not paid_notices:
             P.logger.info('유료화/종료 공지 없음')
             return 0
 
-        # 모든 후보 작품 (title, kind) 수집 — 중복 제거
+        today = date.today()
         seen_titles: set = set()
         targets: List[Dict[str, str]] = []
+        skipped_past = 0
         for n in paid_notices:
+            year = self._extract_notice_year(n.get('title') or '')
             items = KakaotoonClient.parse_paid_notice(n.get('content') or '')
             for it in items:
                 t = it['title']
                 if t in seen_titles:
                     continue
+                paid_dt = self._parse_item_date(year, it.get('date', ''))
+                if paid_dt is not None and paid_dt < today:
+                    skipped_past += 1
+                    continue
                 seen_titles.add(t)
+                it['_paid_date'] = paid_dt.isoformat() if paid_dt else ''
+                it['_year'] = year
                 targets.append(it)
-        P.logger.info('공지에서 추출된 작품: %d개 (paid=%d ended=%d)',
+        P.logger.info('공지 추출 작품: %d개 (paid=%d ended=%d, 과거날짜 스킵=%d)',
                       len(targets),
                       sum(1 for x in targets if x['kind'] == 'paid'),
-                      sum(1 for x in targets if x['kind'] == 'ended'))
+                      sum(1 for x in targets if x['kind'] == 'ended'),
+                      skipped_past)
+        if not targets:
+            return 0
 
         processed = 0
         for it in targets:

@@ -29,7 +29,6 @@ class ModuleBasic(PluginModuleBase):
             'output_format': 'webp',
             'notice_auto_dl': 'False',         # 매월 유료화/종료 공지 자동 다운
             'notice_subdir': '완결',            # 저장될 하위 폴더명
-            'notice_months': '2',               # 최근 N개월 공지 검사 (기본 2)
             'auto_start': 'False',
         }
         self.web_list_model = ModelKakaotoonItem
