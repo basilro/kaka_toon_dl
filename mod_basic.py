@@ -40,24 +40,43 @@ class ModuleBasic(PluginModuleBase):
 
     @staticmethod
     def _migrate_db():
-        """기존 sqlite DB 에 누락된 컬럼 추가. 신규 설치는 create_all 로 OK."""
+        """기존 sqlite DB 에 누락된 컬럼 추가. 신규 설치는 create_all 로 OK.
+
+        SJVA 는 플러그인 별 bind sqlite 를 쓰므로 bind 된 engine 을 사용해야 함.
+        또 __init__ 단계에서는 app context 가 없으므로 명시적으로 wrap.
+        """
         try:
             from sqlalchemy import inspect as sa_inspect, text
-            insp = sa_inspect(db.engine)
-            cols = {c['name'] for c in insp.get_columns('kaka_toon_dl_item')}
-            # 필요한 컬럼 → ALTER 문
-            need = []
-            if 'dl_group' not in cols:
-                need.append(('dl_group', 'VARCHAR'))
-            for col, typ in need:
-                stmt = f'ALTER TABLE kaka_toon_dl_item ADD COLUMN {col} {typ}'
-                with db.engine.connect() as conn:
-                    conn.execute(text(stmt))
+            with F.app.app_context():
+                # 플러그인 bind 된 engine 우선, 없으면 default
+                bind = P.package_name
+                engine = None
+                try:
+                    engine = db.engines.get(bind)  # Flask-SQLAlchemy 3.x
+                except Exception:
+                    pass
+                if engine is None:
                     try:
-                        conn.commit()
+                        engine = db.get_engine(bind=bind)  # 2.x
                     except Exception:
-                        pass
-                P.logger.info('[basic] DB migration: %s 추가됨', col)
+                        engine = db.engine
+
+                insp = sa_inspect(engine)
+                try:
+                    cols = {c['name'] for c in insp.get_columns('kaka_toon_dl_item')}
+                except Exception as e:
+                    P.logger.warning('[basic] DB migration: 테이블 정보 조회 실패 — %s', e)
+                    return
+                need = []
+                if 'dl_group' not in cols:
+                    need.append(('dl_group', 'VARCHAR'))
+                if not need:
+                    return
+                for col, typ in need:
+                    stmt = f'ALTER TABLE kaka_toon_dl_item ADD COLUMN {col} {typ}'
+                    with engine.begin() as conn:  # DDL — 자동 commit
+                        conn.execute(text(stmt))
+                    P.logger.info('[basic] DB migration: %s 추가됨', col)
         except Exception as e:
             P.logger.warning('[basic] DB migration 실패 (계속): %s', e)
 
@@ -162,6 +181,9 @@ class ModuleBasic(PluginModuleBase):
         P.logger.info('[basic] do_action BEGIN')
         try:
             with F.app.app_context():
+                # __init__ 시점에 migration 이 app context 부족으로 실패해도
+                # 여기서 한번 더 시도 (idempotent — 이미 컬럼 있으면 no-op)
+                self._migrate_db()
                 w = Worker()
                 ret = w.run()
                 P.logger.info('[basic] do_action END ret=%s', ret)
