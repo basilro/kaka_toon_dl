@@ -288,23 +288,49 @@ class KakaotoonClient:
         body = self._check(self._json(r), r)
         return body.get('data', {}) or {}
 
+    # ---- 사용자 ID (복호화 키 도출에 필요) ----
+    def get_user_id(self, any_episode_id: int) -> Optional[str]:
+        """로그인된 사용자의 kakao webtoon userId (예: 'koru00000020f7d0b7').
+
+        /popularity/v1/my-review?episodeId=... 응답의 userId 필드.
+        decrypt_cef 의 키 도출에 사용됨.
+        """
+        s = self._session()
+        try:
+            r = s.get(f'{GW}/popularity/v1/my-review',
+                      params={'episodeId': any_episode_id}, timeout=10)
+            body = self._check(self._json(r), r)
+            return (body.get('data') or {}).get('userId')
+        except Exception as e:
+            self._log('warning', 'get_user_id 실패: %s', e)
+            return None
+
     # ---- 이미지 리소스 ----
     def get_media_resources(self, episode_id: int) -> Dict:
-        """이미지 URL 목록 + AES key/iv (aid, zid) 받기."""
+        """이미지 URL 목록 + 암호화 키 (aid, zid) + 키 도출 메타 받기.
+
+        반환 dict 에는 응답 data 외에 `_req` 필드로 우리가 보낸 nonce/timestamp
+        도 포함 — 이 값들이 복호화 키 도출에 사용됨.
+        """
         s = self._session()
         s.headers['Content-Type'] = 'application/json'
+        nonce = _rand_nonce()
+        timestamp = _now_ms()
         payload = {
             'id': episode_id,
             'type': 'AES_CBC_WEBP',
-            'nonce': _rand_nonce(),
-            'timestamp': _now_ms(),
+            'nonce': nonce,
+            'timestamp': timestamp,
             'download': False,
             'webAppId': self._web_app_id,
         }
         r = s.post(f'{GW}/episode/v1/views/viewer/episodes/{episode_id}/media-resources',
                    data=json.dumps(payload), timeout=20)
         body = self._check(self._json(r), r)
-        return body.get('data', {}) or {}
+        data = body.get('data', {}) or {}
+        data['_req'] = {'nonce': nonce, 'timestamp': timestamp,
+                        'episode_id': episode_id}
+        return data
 
     # ---- 다운로드 + 복호화 ----
     def download_image(self, url: str) -> bytes:
@@ -317,53 +343,71 @@ class KakaotoonClient:
         return r.content
 
     @staticmethod
-    def decrypt_cef(encrypted: bytes, aid_b64: str, zid_b64: str) -> bytes:
-        """AES-CBC 복호화 후 PKCS7 패딩 제거 → WebP bytes 반환.
+    def _pkcs7_unpad(b: bytes) -> bytes:
+        if not b:
+            return b
+        p = b[-1]
+        if 1 <= p <= 16 and b.endswith(bytes([p]) * p):
+            return b[:-p]
+        return b
 
-        키 추정:
-          aid (base64, 32B) → AES-256 key
-          zid (base64, 32B) → first 16B = IV (AES block size)
-        실패 시 fallback 조합도 시도.
+    @staticmethod
+    def derive_image_key_iv(aid_b64: str, zid_b64: str,
+                            user_id: Optional[str], episode_id: int,
+                            timestamp: str, nonce: str) -> Tuple[bytes, bytes]:
+        """카카오웹툰 viewer JS 분석으로 확보한 키 도출 알고리즘.
+
+        u = (userId || episodeId) + episodeId + timestamp
+        c = nonce + timestamp
+        keyMat = SHA-256(u)                            # 32B AES-256 unwrap key
+        ivMat  = SHA-256(c)[:16]                       # 16B unwrap IV
+        actualKey = unpad(AES-256-CBC-decrypt(base64decode(aid), keyMat, ivMat))  # 16B
+        actualIv  = unpad(AES-256-CBC-decrypt(base64decode(zid), keyMat, ivMat))  # 16B
         """
         if AES is None:
             raise KakaotoonError('pycryptodome 미설치 — pip install pycryptodome')
-        aid = base64.b64decode(aid_b64)
-        zid = base64.b64decode(zid_b64)
+        uid_part = str(user_id) if user_id else str(episode_id)
+        u_str = uid_part + str(episode_id) + str(timestamp)
+        c_str = str(nonce) + str(timestamp)
+        # JS의 charCodeAt(0) 동일: 각 char를 1 byte로 (latin-1).
+        key_mat = hashlib.sha256(u_str.encode('latin-1')).digest()
+        iv_mat = hashlib.sha256(c_str.encode('latin-1')).digest()[:16]
 
-        attempts = []
-        # 1. 가장 가능성 높음: AES-256, key=aid(32B), iv=zid[:16]
-        if len(aid) >= 32 and len(zid) >= 16:
-            attempts.append(('aes256-key:aid32-iv:zid[:16]', aid[:32], zid[:16]))
-        # 2. AES-256, key=aid, iv=zid[16:32]
-        if len(aid) >= 32 and len(zid) >= 32:
-            attempts.append(('aes256-key:aid32-iv:zid[16:32]', aid[:32], zid[16:32]))
-        # 3. AES-128, key=aid[:16], iv=zid[:16]
-        if len(aid) >= 16 and len(zid) >= 16:
-            attempts.append(('aes128-key:aid[:16]-iv:zid[:16]', aid[:16], zid[:16]))
-        # 4. AES-128, key=zid[:16], iv=aid[:16]   (swap 시도)
-        if len(aid) >= 16 and len(zid) >= 16:
-            attempts.append(('aes128-key:zid[:16]-iv:aid[:16]', zid[:16], aid[:16]))
+        wrapped_key = base64.b64decode(aid_b64)
+        wrapped_iv = base64.b64decode(zid_b64)
+        actual_key = KakaotoonClient._pkcs7_unpad(
+            AES.new(key_mat, AES.MODE_CBC, iv_mat).decrypt(wrapped_key))
+        actual_iv = KakaotoonClient._pkcs7_unpad(
+            AES.new(key_mat, AES.MODE_CBC, iv_mat).decrypt(wrapped_iv))
+        # 실제 이미지 cipher 는 AES-128 (16B key, 16B IV)
+        if len(actual_key) not in (16, 24, 32):
+            raise KakaotoonError(f'actual_key 길이 비정상: {len(actual_key)}B')
+        if len(actual_iv) != 16:
+            # IV 가 16B 아니면 첫 16B 만 사용 (자기방어)
+            actual_iv = actual_iv[:16] if len(actual_iv) >= 16 else actual_iv.ljust(16, b'\0')
+        return actual_key, actual_iv
 
-        last_err = None
-        for name, key, iv in attempts:
-            try:
-                cipher = AES.new(key, AES.MODE_CBC, iv)
-                dec = cipher.decrypt(encrypted)
-                # PKCS7 패딩 제거
-                if dec:
-                    pad = dec[-1]
-                    if 1 <= pad <= 16 and dec.endswith(bytes([pad]) * pad):
-                        dec = dec[:-pad]
-                # WebP magic check: RIFF....WEBP
-                if len(dec) >= 12 and dec[:4] == b'RIFF' and dec[8:12] == b'WEBP':
-                    return dec
-                # JPEG/PNG 도 일단 수용
-                if dec[:3] == b'\xff\xd8\xff' or dec[:8] == b'\x89PNG\r\n\x1a\n':
-                    return dec
-            except Exception as e:
-                last_err = e
-                continue
-        raise KakaotoonError(f'복호화 실패: 모든 조합 시도. last={last_err}')
+    @staticmethod
+    def decrypt_cef(encrypted: bytes, aid_b64: str, zid_b64: str,
+                    user_id: Optional[str], episode_id: int,
+                    timestamp: str, nonce: str) -> bytes:
+        """`.webp.cef` 암호화 이미지 복호화.
+
+        viewer JS 의 키 도출 + AES-CBC decrypt + PKCS7 unpad.
+        결과: WebP bytes (RIFF...WEBP).
+        """
+        if AES is None:
+            raise KakaotoonError('pycryptodome 미설치 — pip install pycryptodome')
+        key, iv = KakaotoonClient.derive_image_key_iv(
+            aid_b64, zid_b64, user_id, episode_id, timestamp, nonce)
+        dec = AES.new(key, AES.MODE_CBC, iv).decrypt(encrypted)
+        dec = KakaotoonClient._pkcs7_unpad(dec)
+        if not (len(dec) >= 12 and dec[:4] == b'RIFF' and dec[8:12] == b'WEBP'):
+            # 매직 검증 실패 — JPG/PNG fallback (드물지만 fallback 응답)
+            if dec[:3] != b'\xff\xd8\xff' and dec[:8] != b'\x89PNG\r\n\x1a\n':
+                raise KakaotoonError(
+                    f'복호화 결과가 WebP/JPG/PNG 아님 (first8={dec[:8].hex()})')
+        return dec
 
     # ---- 이미지 포맷 변환 ----
     @staticmethod

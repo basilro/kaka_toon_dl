@@ -23,6 +23,10 @@ _session/
 cookies*.json
 browser_cookies.json
 
+# 리버스 엔지니어링 작업 결과물 (실수로 커밋 방지)
+/js/
+_sample*
+
 # 개인 설정 / 캐시
 config.local.*
 *.local

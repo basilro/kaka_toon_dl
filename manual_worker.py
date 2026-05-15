@@ -272,11 +272,15 @@ def _download_episode(cli: KakaotoonClient, content_id: int, content_title: str,
     media = mr.get('media') or {}
     files = media.get('files') or []
     aid = media.get('aid'); zid = media.get('zid')
+    req_meta = mr.get('_req') or {}
     out_fmt = (P.ModelSetting.get('output_format') or 'webp').lower().strip()
     if not files:
         _ep_update(idx, state='failed', error='no media files')
         rec.status = 'failed'; rec.error_msg = 'no media files'; db.session.commit()
         return 'failed'
+
+    # 복호화용 kakao userId (회차당 1회 조회 — manual 은 보통 회차가 적음)
+    user_id = cli.get_user_id(episode_id)
 
     c_folder = _safe_filename(content_title)
     e_folder = f'{ep_no:04d}_{_safe_filename(episode_title)}'
@@ -295,7 +299,15 @@ def _download_episode(cli: KakaotoonClient, content_id: int, content_title: str,
         try:
             enc = cli.download_image(url)
             try:
-                dec = KakaotoonClient.decrypt_cef(enc, aid, zid) if (aid and zid) else None
+                if aid and zid and req_meta:
+                    dec = KakaotoonClient.decrypt_cef(
+                        enc, aid, zid,
+                        user_id=user_id,
+                        episode_id=episode_id,
+                        timestamp=req_meta.get('timestamp', ''),
+                        nonce=req_meta.get('nonce', ''))
+                else:
+                    dec = None
             except KakaotoonError as e:
                 dec = None
                 P.logger.warning('[%s] %s page %d 복호화 실패: %s', content_title, episode_title, i, e)

@@ -74,6 +74,7 @@ class Worker:
         self.use_owned_ticket = (self.cfg.get('use_owned_ticket') or 'False') == 'True'
         self.output_format = (self.cfg.get('output_format') or 'webp').lower().strip()
         self.client: Optional[KakaotoonClient] = None
+        self.user_id: Optional[str] = None  # 첫 회차 처리 시 lazy 로드
 
     @staticmethod
     def _split_items(raw: str) -> List[str]:
@@ -320,9 +321,15 @@ class Worker:
         media = mr.get('media') or {}
         files = media.get('files') or []
         aid = media.get('aid'); zid = media.get('zid')
+        req_meta = mr.get('_req') or {}
         if not files:
             rec.status = 'failed'; rec.error_msg = 'no media files'
             db.session.commit(); return 'failed'
+
+        # 복호화에 필요한 userId — 첫 회차 진입 시 1회 조회
+        if self.user_id is None:
+            self.user_id = self.client.get_user_id(episode_id)
+            P.logger.info('[%s] kakao userId 확보: %r', content_title, self.user_id)
 
         # ---- 저장 경로 ----
         c_folder = _safe_filename(content_title)
@@ -341,7 +348,15 @@ class Worker:
             try:
                 enc = self.client.download_image(url)
                 try:
-                    dec = KakaotoonClient.decrypt_cef(enc, aid, zid) if (aid and zid) else None
+                    if aid and zid and req_meta:
+                        dec = KakaotoonClient.decrypt_cef(
+                            enc, aid, zid,
+                            user_id=self.user_id,
+                            episode_id=episode_id,
+                            timestamp=req_meta.get('timestamp', ''),
+                            nonce=req_meta.get('nonce', ''))
+                    else:
+                        dec = None
                 except KakaotoonError as e:
                     dec = None
                     P.logger.warning('[%s] %s page %d 복호화 실패: %s — .cef 원본만 저장',
