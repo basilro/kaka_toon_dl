@@ -5,7 +5,7 @@ from .setup import *
 
 class ModelKakaotoonItem(ModelBase):
     P = P
-    __tablename__ = 'kakao_toon_dl_item'
+    __tablename__ = 'kaka_toon_dl_item'
     __table_args__ = {'mysql_collate': 'utf8_general_ci'}
     __bind_key__ = P.package_name
 

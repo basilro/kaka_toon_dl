@@ -20,7 +20,7 @@
    - `POST /episode/v3/episodes/{id}/pass` (body `{}`) → 차감 + 열람 등록
 5. `POST /episode/v1/views/viewer/episodes/{id}/media-resources` → `media.files[].url` (`.webp.cef`) + AES key/iv (`aid`, `zid`)
 6. `.webp.cef` 다운로드 → AES-CBC 복호화 → `.webp` 저장
-7. DB(`kakao_toon_dl_item`)에 회차별 이력 기록 — 같은 회차 재다운로드 안 함
+7. DB(`kaka_toon_dl_item`)에 회차별 이력 기록 — 같은 회차 재다운로드 안 함
 
 ## 이미지 복호화 (AES_CBC_WEBP)
 
