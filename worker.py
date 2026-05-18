@@ -29,11 +29,25 @@ def compress_episode_folder(ep_folder: str) -> Optional[str]:
     .webp.cef 원본 / _keys.json 같은 디버그 파일은 제외.
 
     반환: 생성/기존 zip 경로 또는 None (실패).
+
+    안전장치: 폴더 안에 서브디렉토리가 있으면 회차 폴더가 아닌 작품/그룹 폴더로
+    판단하여 압축 거부 (실수로 작품 전체를 날리는 사고 방지).
     """
     import shutil
     import zipfile
     if not os.path.isdir(ep_folder):
         return None
+
+    try:
+        entries = os.listdir(ep_folder)
+    except Exception:
+        return None
+    for entry in entries:
+        if os.path.isdir(os.path.join(ep_folder, entry)):
+            P.logger.warning(
+                '압축 거부 (서브디렉토리 존재 → 회차 폴더 아님): %s', ep_folder)
+            return None
+
     parent = os.path.dirname(ep_folder)
     name = os.path.basename(ep_folder)
     zip_path = os.path.join(parent, name + '.zip')
@@ -45,14 +59,11 @@ def compress_episode_folder(ep_folder: str) -> Optional[str]:
             pass
         return zip_path
 
-    try:
-        files_to_zip = []
-        for f in sorted(os.listdir(ep_folder)):
-            path = os.path.join(ep_folder, f)
-            if os.path.isfile(path) and f.lower().endswith(_IMAGE_EXTS):
-                files_to_zip.append((f, path))
-    except Exception:
-        return None
+    files_to_zip = []
+    for f in sorted(entries):
+        path = os.path.join(ep_folder, f)
+        if os.path.isfile(path) and f.lower().endswith(_IMAGE_EXTS):
+            files_to_zip.append((f, path))
     if not files_to_zip:
         return None
 
@@ -556,9 +567,14 @@ class Worker:
                       message='download_path 미설정/없음')
             return {'ret': 'fail', 'reason': 'no_download_path'}
 
-        # 폴더 스캔 — 압축 중 폴더가 삭제되므로 미리 목록 수집
+        # 폴더 스캔 — 압축 중 폴더가 삭제되므로 미리 목록 수집.
+        # '회차 폴더' = 서브디렉토리 없는 leaf + 이미지 보유 폴더만 후보로 선정
+        # (작품 폴더가 cover.jpg 만으로 잘못 후보에 들어가 통째로 zip+rmtree
+        #  되는 사고 방지).
         candidates: List[str] = []
-        for root, _dirs, files in os.walk(self.download_root):
+        for root, dirs, files in os.walk(self.download_root):
+            if dirs:
+                continue
             if any(f.lower().endswith(_IMAGE_EXTS) for f in files):
                 candidates.append(root)
 
