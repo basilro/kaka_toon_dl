@@ -10,6 +10,7 @@ from .client import (KakaotoonClient, KakaotoonError,
 from .model import ModelKakaotoonItem
 from .notify import (send_webhook, build_download_summary,
                      build_cookie_expired_message)
+from . import meta as meta_mod
 from .setup import *  # P, db, logger
 
 
@@ -79,6 +80,8 @@ class Worker:
         self.notice_subdir = (self.cfg.get('notice_subdir') or '완결').strip() or '완결'
         self.notify_cookie_url = (self.cfg.get('notify_webhook_cookie') or '').strip()
         self.notify_download_url = (self.cfg.get('notify_webhook_download') or '').strip()
+        self.proxy_url = KakaotoonClient.resolve_proxy(
+            self.cfg.get('use_proxy'), self.cfg.get('proxy_url'))
         self.client: Optional[KakaotoonClient] = None
         self.user_id: Optional[str] = None  # 첫 회차 처리 시 lazy 로드
         self.completed_items: List[Dict[str, Any]] = []  # 알림용 누적
@@ -113,7 +116,8 @@ class Worker:
             return {'ret': 'fail', 'reason': 'no_titles'}
 
         try:
-            self.client = KakaotoonClient(self.cookies_json, logger=P.logger)
+            self.client = KakaotoonClient(self.cookies_json, logger=P.logger,
+                                          proxy_url=self.proxy_url)
         except AuthRequiredError as e:
             _auto_set(status='error', finished_at=datetime.now().isoformat(),
                       message=f'쿠키 인증 실패: {e}')
@@ -304,6 +308,10 @@ class Worker:
             pass
 
         _auto_set(current_phase='fetch_episodes', current_title=f'[공지] {display}')
+
+        # 공지 기반 다운은 유료화/완결 → is_completed=True 로 info.xml 기록
+        self._ensure_meta(display, content_id, group='complete', is_completed=True)
+
         try:
             eps = self.client.get_episodes_all(content_id)
         except KakaotoonError as e:
@@ -366,6 +374,9 @@ class Worker:
                 _auto_set(current_title=title)
         except KakaotoonError as e:
             P.logger.warning('[%s] content meta 실패 (계속): %s', title, e)
+
+        # info.xml / cover.jpg — 작품 폴더에 한 번만
+        self._ensure_meta(title, content_id, group='main')
 
         try:
             eps = self.client.get_episodes_all(content_id)
@@ -467,6 +478,141 @@ class Worker:
                     break
 
         return 'downloaded' if downloaded_count else 'skipped'
+
+    # ---- 전 작품 메타 일괄 동기화 (UI 버튼) ----
+    def sync_metadata_all(self) -> dict:
+        """titles 리스트의 모든 작품에 대해 info.xml/cover.jpg 누락분 생성.
+
+        다운로드 폴더에 작품 폴더가 이미 있는 항목만 처리 (없는 작품은
+        만들지 않고 스킵 — 다운로드 전에 굳이 빈 폴더 만들 필요 없음).
+        완결 그룹(notice_subdir 아래)도 동시에 점검.
+        """
+        P.logger.info('[basic] sync_metadata_all BEGIN items=%s', self.items)
+        _auto_reset()
+        _auto_set(status='running', started_at=datetime.now().isoformat(),
+                  message='메타 동기화 시작', titles_total=len(self.items))
+        if not self.download_root:
+            _auto_set(status='error', finished_at=datetime.now().isoformat(),
+                      message='download_path 미설정')
+            return {'ret': 'fail', 'reason': 'no_download_path'}
+        if not self.cookies_json:
+            _auto_set(status='error', finished_at=datetime.now().isoformat(),
+                      message='cookies_json 미설정')
+            return {'ret': 'fail', 'reason': 'no_cookies'}
+        if not self.items:
+            _auto_set(status='error', finished_at=datetime.now().isoformat(),
+                      message='체크할 작품 미설정')
+            return {'ret': 'fail', 'reason': 'no_titles'}
+
+        try:
+            self.client = KakaotoonClient(self.cookies_json, logger=P.logger,
+                                          proxy_url=self.proxy_url)
+        except AuthRequiredError as e:
+            _auto_set(status='error', finished_at=datetime.now().isoformat(),
+                      message=f'쿠키 인증 실패: {e}')
+            return {'ret': 'fail', 'reason': 'auth', 'msg': str(e)}
+
+        summary = {'titles': len(self.items), 'info': 0, 'cover': 0,
+                   'skipped_no_folder': 0, 'failed': 0}
+        for raw in self.items:
+            _auto_set(current_title=raw, current_phase='sync_metadata',
+                      current_episode='', current_pages_done=0,
+                      current_pages_total=0)
+            try:
+                cid = KakaotoonClient.extract_content_id(raw)
+                if cid is None:
+                    it = self.client.find_content(raw)
+                    if not it:
+                        summary['failed'] += 1
+                        continue
+                    cid = it['id']
+                    title_guess = it.get('title') or raw
+                else:
+                    title_guess = raw
+                _auto_set(current_title=title_guess)
+
+                # main / complete 두 위치 모두 점검 — 폴더가 있는 쪽에만 메타 채움
+                any_processed = False
+                cd_cache = None
+                for group, is_completed in (('main', None), ('complete', True)):
+                    folder = self._content_folder(title_guess, group)
+                    if not os.path.isdir(folder):
+                        continue
+                    any_processed = True
+                    if meta_mod.is_meta_complete(folder):
+                        continue
+                    if cd_cache is None:
+                        cd_cache = self.client.get_meta_for_info(
+                            cid, title_hint=title_guess) or {}
+                        # 메타에서 더 정확한 제목 발견 시 폴더 이름 재구성
+                        new_title = (cd_cache.get('title') or '').strip()
+                        if new_title and new_title != title_guess:
+                            alt_folder = self._content_folder(new_title, group)
+                            if os.path.isdir(alt_folder) and not os.path.isdir(folder):
+                                folder = alt_folder
+                            title_guess = new_title
+                            _auto_set(current_title=new_title)
+                    if not cd_cache:
+                        summary['failed'] += 1
+                        continue
+                    r = meta_mod.ensure_meta(
+                        folder, cd_cache,
+                        session=self.client.make_session(),
+                        logger=P.logger,
+                        is_completed=is_completed)
+                    if r.get('info'):
+                        summary['info'] += 1
+                    if r.get('cover'):
+                        summary['cover'] += 1
+                if not any_processed:
+                    summary['skipped_no_folder'] += 1
+            except Exception as e:
+                import traceback
+                P.logger.error('[sync_metadata] %r 예외: %s', raw, e)
+                P.logger.error(traceback.format_exc())
+                summary['failed'] += 1
+            _auto_set(titles_done=(summary['info'] + summary['cover']
+                                   + summary['skipped_no_folder']
+                                   + summary['failed']))
+
+        _auto_set(status='done', finished_at=datetime.now().isoformat(),
+                  current_title='', current_phase='', current_episode='',
+                  message=(f"메타 동기화 완료 — info {summary['info']}, "
+                           f"cover {summary['cover']}, "
+                           f"폴더없음 {summary['skipped_no_folder']}, "
+                           f"실패 {summary['failed']}"))
+        return {'ret': 'success', **summary}
+
+    # ---- info.xml / cover.jpg ----
+    def _content_folder(self, content_title: str, group: str) -> str:
+        c_folder = _safe_filename(content_title)
+        if group == 'complete':
+            return os.path.join(self.download_root,
+                                _safe_filename(self.notice_subdir),
+                                c_folder)
+        return os.path.join(self.download_root, c_folder)
+
+    def _ensure_meta(self, content_title: str, content_id: int,
+                     group: str = 'main',
+                     is_completed: Optional[bool] = None) -> None:
+        """작품 폴더에 info.xml/cover.jpg 가 없으면 생성. 멱등."""
+        try:
+            folder = self._content_folder(content_title, group)
+            if meta_mod.is_meta_complete(folder):
+                return
+            cd = self.client.get_meta_for_info(content_id,
+                                               title_hint=content_title)
+            if not cd:
+                P.logger.info('[%s] meta dict 없음 — info/cover 스킵',
+                              content_title)
+                return
+            meta_mod.ensure_meta(folder, cd,
+                                 session=self.client.make_session(),
+                                 logger=P.logger,
+                                 is_completed=is_completed)
+        except Exception as e:
+            P.logger.warning('[%s] ensure_meta 예외(계속): %s',
+                             content_title, e)
 
     # ---- one episode ----
     def _download_one(self, content_title: str, content_id: int,
