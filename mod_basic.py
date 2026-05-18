@@ -34,6 +34,7 @@ class ModuleBasic(PluginModuleBase):
             'cookie_expired_notified': 'False',# 쿠키 만료 알림 1회 발송 플래그
             'use_proxy': 'False',              # 프록시 사용 여부
             'proxy_url': '',                   # warproxy 등. use_proxy=True + 값 있을 때만 사용
+            'use_compress': 'False',           # 정상 다운 완료 시 회차 폴더 ZIP 으로 압축 + 원본 삭제
             'auto_start': 'False',
         }
         self.web_list_model = ModelKakaotoonItem
@@ -116,6 +117,8 @@ class ModuleBasic(PluginModuleBase):
                 ret = self.do_action_sync_metadata()
             elif command == 'cleanup_keys_json':
                 ret = self.do_action_cleanup_keys_json()
+            elif command == 'compress_all':
+                ret = self.do_action_compress_all()
             elif command == 'mrun':
                 from . import manual_worker
                 url = (arg1 or '').strip()
@@ -221,6 +224,25 @@ class ModuleBasic(PluginModuleBase):
         threading.Thread(target=_bg, daemon=True).start()
         return {'ret': 'success',
                 'msg': '메타 동기화 시작됨 — "진행 상황" 메뉴에서 확인'}
+
+    def do_action_compress_all(self):
+        """download_path 아래 모든 회차 폴더 ZIP 압축 + 원본 폴더 삭제 (백그라운드)."""
+        import threading
+        from . import worker as auto_worker
+        if auto_worker.get_auto_state().get('status') == 'running':
+            return {'ret': 'fail', 'msg': '이미 다른 작업 실행 중'}
+
+        def _bg():
+            try:
+                with F.app.app_context():
+                    Worker().compress_all()
+            except Exception as e:
+                P.logger.error('[basic] compress_all Exception: %s', e)
+                P.logger.error(traceback.format_exc())
+
+        threading.Thread(target=_bg, daemon=True).start()
+        return {'ret': 'success',
+                'msg': '압축 시작됨 — "진행 상황" 메뉴에서 확인'}
 
     def do_action_cleanup_keys_json(self):
         """download_path 아래의 _keys.json 일괄 삭제 (과거 버그 잔재 청소)."""
