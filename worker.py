@@ -479,6 +479,43 @@ class Worker:
 
         return 'downloaded' if downloaded_count else 'skipped'
 
+    # ---- 기존 _keys.json 일괄 삭제 (UI 버튼) ----
+    def cleanup_keys_json(self) -> dict:
+        """download_path 아래의 모든 _keys.json 파일을 찾아 삭제.
+
+        과거 버전에서 정상 다운로드된 회차에도 _keys.json 이 같이 남던 버그
+        잔재 청소용. 향후 다운로드는 복호화 실패 시에만 _keys.json 생성됨.
+        """
+        P.logger.info('[basic] cleanup_keys_json BEGIN root=%s', self.download_root)
+        _auto_reset()
+        _auto_set(status='running', started_at=datetime.now().isoformat(),
+                  message='_keys.json 청소 시작')
+        if not self.download_root or not os.path.isdir(self.download_root):
+            _auto_set(status='error', finished_at=datetime.now().isoformat(),
+                      message='download_path 미설정/없음')
+            return {'ret': 'fail', 'reason': 'no_download_path'}
+
+        removed = 0
+        failed = 0
+        for root, _dirs, files in os.walk(self.download_root):
+            if '_keys.json' in files:
+                target = os.path.join(root, '_keys.json')
+                try:
+                    os.remove(target)
+                    removed += 1
+                    _auto_set(message=f'삭제 {removed}개…',
+                              current_title=os.path.relpath(root, self.download_root))
+                except Exception as e:
+                    failed += 1
+                    P.logger.warning('_keys.json 삭제 실패 %s: %s', target, e)
+
+        _auto_set(status='done', finished_at=datetime.now().isoformat(),
+                  current_title='', current_phase='',
+                  message=f'_keys.json 청소 완료 — 삭제 {removed}개, 실패 {failed}개')
+        P.logger.info('[basic] cleanup_keys_json END removed=%d failed=%d',
+                      removed, failed)
+        return {'ret': 'success', 'removed': removed, 'failed': failed}
+
     # ---- 전 작품 메타 일괄 동기화 (UI 버튼) ----
     def sync_metadata_all(self) -> dict:
         """titles 리스트의 모든 작품에 대해 info.xml/cover.jpg 누락분 생성.
@@ -695,6 +732,7 @@ class Worker:
         _auto_set(current_pages_total=len(files), current_pages_done=0)
 
         downloaded = 0; total_bytes = 0; failed: List[Tuple[int, str]] = []
+        cef_saved = False  # 복호화 실패해서 .webp.cef 원본을 저장한 페이지가 있는지
         for i, f in enumerate(files, start=1):
             url = f.get('url')
             try:
@@ -724,6 +762,7 @@ class Worker:
                     with open(local, 'wb') as fp:
                         fp.write(enc)
                     total_bytes += len(enc)
+                    cef_saved = True
                 downloaded += 1
                 _auto_set(current_pages_done=downloaded)
             except Exception as e:
@@ -731,8 +770,9 @@ class Worker:
                 P.logger.warning('[%s] %s page %d 실패: %s',
                                  content_title, episode_title, i, e)
 
-        # 복호화 실패 케이스 디버깅용으로 aid/zid 저장 (decryption tried but failed)
-        if aid and zid:
+        # 복호화 실패해서 .webp.cef 원본이 남은 페이지가 있을 때만 _keys.json 저장
+        # (정상 다운로드된 회차에는 만들지 않음 — 후처리에 필요 없으므로)
+        if cef_saved and aid and zid:
             try:
                 with open(os.path.join(save_dir, '_keys.json'), 'w', encoding='utf-8') as fp:
                     fp.write(f'{{"aid": "{aid}", "zid": "{zid}"}}\n')

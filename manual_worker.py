@@ -311,6 +311,7 @@ def _download_episode(cli: KakaotoonClient, content_id: int, content_title: str,
     db.session.commit()
 
     downloaded = 0; total_bytes = 0; failed = 0
+    cef_saved = False  # 복호화 실패해서 .webp.cef 원본을 저장한 페이지가 있는지
     for i, f in enumerate(files, start=1):
         if _cancel_flag.is_set():
             break
@@ -341,13 +342,15 @@ def _download_episode(cli: KakaotoonClient, content_id: int, content_title: str,
                 with open(local, 'wb') as fp:
                     fp.write(enc)
                 total_bytes += len(enc)
+                cef_saved = True
             downloaded += 1
             _ep_update(idx, pages_done=downloaded)
         except Exception as e:
             failed += 1
             P.logger.warning('manual %s p%s 실패: %s', episode_title, i, e)
 
-    if aid and zid:
+    # 복호화 실패해서 .webp.cef 원본이 남은 페이지가 있을 때만 _keys.json 저장
+    if cef_saved and aid and zid:
         try:
             with open(os.path.join(save_dir, '_keys.json'), 'w', encoding='utf-8') as fp:
                 fp.write(f'{{"aid": "{aid}", "zid": "{zid}"}}\n')
