@@ -5,7 +5,8 @@
   {{ macros.m_button_group([['globalSettingSaveBtn', '설정 저장'],
                             ['globalImmediatelyExecuteBtn', '즉시 실행'],
                             ['verifyCookiesBtn', '쿠키 검증'],
-                            ['syncMetadataBtn', '메타 동기화']]) }}
+                            ['syncMetadataBtn', '메타 동기화'],
+                            ['cleanupKeysJsonBtn', '_keys.json 정리']]) }}
   {{ macros.m_row_start('5') }}
   {{ macros.m_row_end() }}
   <nav>
@@ -36,7 +37,7 @@
             [['select_download_path_btn', '경로 선택']],
             value=arg['download_path'],
             desc=['{다운로드경로}/{작품제목}/{NNNN_회차제목}/{001.<ext> ...} 형태로 저장됨',
-                  '※ AES-CBC 복호화 실패 시 원본 .webp.cef + _keys.json 저장']) }}
+                  '※ AES-CBC 복호화 실패 시에만 원본 .webp.cef + _keys.json 저장 (정상 회차에는 미생성)']) }}
 
         {{ macros.setting_input_text('output_format', '이미지 저장 형식',
             value=arg['output_format'],
@@ -160,6 +161,22 @@ $('body').on('click', '#syncMetadataBtn', function(e){
          function(data){
     if(data && data.ret === 'success'){
       $.notify(data.msg || '메타 동기화 시작됨', {className: 'success'});
+    } else {
+      $.notify((data && data.msg) || '실행 실패', {className: 'error'});
+    }
+  }).fail(function(xhr){
+    $.notify('서버 호출 실패: ' + xhr.status, {className: 'error'});
+  });
+});
+
+$('body').on('click', '#cleanupKeysJsonBtn', function(e){
+  e.preventDefault();
+  if (!confirm('다운로드 폴더 아래의 모든 _keys.json 파일을 삭제합니다.\n과거 버전에서 정상 회차에도 같이 남던 잔재 청소용입니다.\n진행 상황은 "진행 상황" 메뉴에서 확인하세요.\n계속하시겠습니까?')) return;
+  $.post('/' + package_name + '/ajax/basic/command',
+         {command: 'cleanup_keys_json'},
+         function(data){
+    if(data && data.ret === 'success'){
+      $.notify(data.msg || '_keys.json 정리 시작됨', {className: 'success'});
     } else {
       $.notify((data && data.msg) || '실행 실패', {className: 'error'});
     }
