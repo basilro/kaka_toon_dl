@@ -9,6 +9,7 @@ from typing import Optional, Dict, Any, List
 from .client import (KakaotoonClient, KakaotoonError,
                      AuthRequiredError, NotReadableError)
 from .model import ModelKakaotoonItem
+from . import meta as meta_mod
 from .setup import *  # P, db, logger
 
 
@@ -80,9 +81,11 @@ def analyze(url_or_id: str) -> Dict[str, Any]:
     cookies_json = (P.ModelSetting.get('cookies_json') or '').strip()
     if not cookies_json:
         return {'ret': 'fail', 'msg': '쿠키 미설정 — 설정 페이지에서 쿠키 주입 후 다시 시도'}
+    proxy_url = KakaotoonClient.resolve_proxy(
+        P.ModelSetting.get('use_proxy'), P.ModelSetting.get('proxy_url'))
 
     try:
-        cli = KakaotoonClient(cookies_json, logger=P.logger)
+        cli = KakaotoonClient(cookies_json, logger=P.logger, proxy_url=proxy_url)
     except AuthRequiredError as e:
         return {'ret': 'fail', 'msg': f'쿠키 인증 실패: {e}'}
     except Exception as e:
@@ -184,11 +187,27 @@ def _run(download_root: str):
     with F.app.app_context():
         try:
             cookies_json = (P.ModelSetting.get('cookies_json') or '').strip()
-            cli = KakaotoonClient(cookies_json, logger=P.logger)
+            proxy_url = KakaotoonClient.resolve_proxy(
+                P.ModelSetting.get('use_proxy'),
+                P.ModelSetting.get('proxy_url'))
+            cli = KakaotoonClient(cookies_json, logger=P.logger,
+                                  proxy_url=proxy_url)
             with _state_lock:
                 content_id = _state['content_id']
                 content_title = _state['content_title']
                 episodes = list(_state['episodes'])
+
+            # 작품 폴더에 info.xml / cover.jpg 보장 (멱등)
+            try:
+                c_folder = os.path.join(download_root, _safe_filename(content_title))
+                if not meta_mod.is_meta_complete(c_folder):
+                    cd = cli.get_meta_for_info(content_id, title_hint=content_title)
+                    if cd:
+                        meta_mod.ensure_meta(c_folder, cd,
+                                             session=cli.make_session(),
+                                             logger=P.logger)
+            except Exception as e:
+                P.logger.warning('[manual] ensure_meta 예외(계속): %s', e)
 
             for idx, ep in enumerate(episodes):
                 if _cancel_flag.is_set():

@@ -56,8 +56,10 @@ def _now_ms() -> str:
 
 class KakaotoonClient:
 
-    def __init__(self, cookies_json: str, logger=None):
+    def __init__(self, cookies_json: str, logger=None, proxy_url: str = None):
         self.logger = logger
+        # warproxy 등 외부 프록시. 비어있으면 직접 연결.
+        self._proxy_url = (proxy_url or '').strip() or None
         self._parse_cookies(cookies_json)
         # webAppId는 카카오웹툰 SPA에서 device 식별자로 쓰임 — _karmt 쿠키 일부 + 타임스탬프 패턴.
         # 정확한 생성 로직은 모르지만 임의 문자열로도 미디어 리소스 응답을 받는 경우가 많음.
@@ -115,6 +117,8 @@ class KakaotoonClient:
             'Origin': WEB,
             'Referer': WEB + '/',
         })
+        if self._proxy_url:
+            s.proxies = {'http': self._proxy_url, 'https': self._proxy_url}
         for c in self.cookies:
             try:
                 s.cookies.set(c['name'], c['value'],
@@ -286,6 +290,59 @@ class KakaotoonClient:
         r = s.get(f'{GW}/decorator/v2/decorator/contents/{content_id}', timeout=15)
         body = self._check(self._json(r), r)
         return body.get('data', {}) or {}
+
+    def get_meta_for_info(self, content_id: int,
+                          title_hint: str = None) -> Optional[Dict]:
+        """info.xml/cover.jpg 생성용 메타 dict. search 결과 우선 (필드 풍부).
+
+        title_hint 가 있으면 그 제목으로 검색해 contentId 매칭 — search 응답이
+        가장 풍부 (catchphrase, featuredCharacterImageA 등 포함). 매칭 실패 시
+        decorator(get_content) 응답 fallback.
+        """
+        merged: Dict[str, Any] = {}
+        try:
+            merged = dict(self.get_content(content_id) or {})
+        except Exception as e:
+            self._log('info', 'get_content(%s) 실패: %s', content_id, e)
+
+        title = (title_hint or merged.get('title') or '').strip()
+        search_hit: Optional[Dict] = None
+        if title:
+            try:
+                items = self.search_content(title, limit=20)
+                for it in items:
+                    if it.get('id') == content_id:
+                        search_hit = it
+                        break
+            except Exception as e:
+                self._log('info', 'search 보강 실패 (title=%r): %s', title, e)
+
+        if search_hit:
+            out = dict(search_hit)
+            # decorator 의 추가 필드(synopsis, isStopContent 등) 보존
+            for k, v in merged.items():
+                if k not in out or not out.get(k):
+                    out[k] = v
+            return out
+        if merged:
+            merged.setdefault('id', content_id)
+            return merged
+        return None
+
+    def make_session(self) -> requests.Session:
+        """외부(meta.py 등) 에서 cover 다운로드용 세션 공유. 프록시·UA 포함."""
+        return self._session()
+
+    @staticmethod
+    def resolve_proxy(use_proxy, proxy_url) -> str:
+        """설정값 → 실제 사용할 프록시 URL. use_proxy=True 이고 URL 있을 때만."""
+        try:
+            enabled = (str(use_proxy or 'False').strip() == 'True')
+        except Exception:
+            enabled = False
+        if not enabled:
+            return ''
+        return (proxy_url or '').strip()
 
     def get_episodes(self, content_id: int, offset: int = 0,
                      limit: int = 30, sort: str = '-NO') -> Tuple[List[Dict], bool]:
