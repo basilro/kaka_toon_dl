@@ -752,6 +752,7 @@ class Worker:
                 'content_title': content_title,
                 'episode_title': episode_title,
                 'episode_no': ep_no,
+                'kind': kind,  # 'free' | 'waitfree' | 'ticket'
             })
         elif downloaded > 0:
             rec.status = 'partial'
