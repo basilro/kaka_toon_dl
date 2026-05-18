@@ -29,11 +29,32 @@ def send_webhook(url: str, message: str, username: str = 'kakao_toon_dl',
         return False
 
 
+_KIND_LABEL = {'waitfree': '기다무', 'ticket': '대여권'}
+
+
+def _ticket_tag(items: List[Dict]) -> str:
+    """회차 목록에서 티켓 사용 종류별 카운트 → '[기다무 ×2, 대여권 ×1]' 같은 태그.
+
+    무료(kind='free' 또는 누락)만 있으면 빈 문자열.
+    """
+    counts: Dict[str, int] = {}
+    for it in items:
+        k = it.get('kind') or 'free'
+        if k in _KIND_LABEL:
+            counts[k] = counts.get(k, 0) + 1
+    if not counts:
+        return ''
+    parts = [f'{_KIND_LABEL[k]} ×{counts[k]}'
+             for k in ('waitfree', 'ticket') if k in counts]
+    return f'  [{", ".join(parts)}]'
+
+
 def build_download_summary(completed_items: List[Dict]) -> str:
     """완료된 다운로드 항목 list → 발송용 텍스트.
 
     completed_items: [{'group': 'main'|'complete', 'content_title': str,
-                       'episode_title': str, 'episode_no': int}, ...]
+                       'episode_title': str, 'episode_no': int,
+                       'kind': 'free'|'waitfree'|'ticket'}, ...]
     """
     if not completed_items:
         return ''
@@ -45,7 +66,14 @@ def build_download_summary(completed_items: List[Dict]) -> str:
         grouped.setdefault(g, {}).setdefault(c, []).append(it)
 
     total = len(completed_items)
-    lines: List[str] = [f'[카카오웹툰] 다운로드 완료 — 총 {total}회차']
+    # 전체 티켓 사용 합계 (헤더용)
+    header_tag = _ticket_tag(completed_items)
+    header = f'[카카오웹툰] 다운로드 완료 — 총 {total}회차'
+    if header_tag:
+        # 헤더는 '[...]' 대신 '(티켓 사용: ...)' 로 풀어 적기
+        body = header_tag.strip().lstrip('[').rstrip(']')
+        header += f' (티켓 사용: {body})'
+    lines: List[str] = [header]
 
     group_label = {'main': '작품', 'complete': '완결'}
     for g in ('main', 'complete'):
@@ -64,7 +92,7 @@ def build_download_summary(completed_items: List[Dict]) -> str:
                 first = eps_sorted[0].get('episode_title') or '?'
                 last = eps_sorted[-1].get('episode_title') or '?'
                 titles = f'{first} ~ {last}'
-            lines.append(f'- {content_title} ({cnt}): {titles}')
+            lines.append(f'- {content_title} ({cnt}): {titles}{_ticket_tag(eps_sorted)}')
     return '\n'.join(lines)
 
 
