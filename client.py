@@ -436,32 +436,51 @@ class KakaotoonClient:
 
     # ---- 회차 열기 (티켓 사용) ----
     def pass_episode(self, episode_id: int) -> Dict:
-        """회차 열람 등록 — 무료 회차면 그냥 통과, 기다무/대여권 회차면 차감.
-        과거 응답: {pass: bool, alreadyRented, canNotUseWaitForFree, messageType, message, ...}
+        """회차 열람 등록. 2-step 흐름 (har/뷰어5 분석):
+          1) probe: body={}  →  응답에 ticketType(=어떤 종류로 열람 가능한지) 포함
+          2) commit: body={"ticketType": <위 ticketType>}  →  pass=true 로 라이센스 발급
+        무료 회차는 첫 probe 가 pass=true 로 바로 반환됨.
+        기다무 회차는 probe 에 pass=false, ticketType="wait_for_free" 가 오고
+        2-step 을 안 하면 viewer 단계에서 NO_LICENSE 로 거부됨.
         """
         s = self._session()
         s.headers['Content-Type'] = 'application/json'
-        r = s.post(f'{GW}/episode/v3/episodes/{episode_id}/pass',
-                   data='{}', timeout=15)
-        body = self._check(self._json(r), r)
-        data = body.get('data', {}) or {}
-        self._log('info', 'pass resp ep=%s pass=%s mt=%s msg=%s cnwff=%s',
+        url = f'{GW}/episode/v3/episodes/{episode_id}/pass'
+
+        def _post(body_dict: Dict) -> Dict:
+            r = s.post(url, data=json.dumps(body_dict), timeout=15)
+            b = self._check(self._json(r), r)
+            return b.get('data', {}) or {}
+
+        # 1) probe
+        data = _post({})
+        self._log('info', 'pass probe ep=%s pass=%s mt=%s tt=%s cnwff=%s',
                   episode_id, data.get('pass'), data.get('messageType'),
-                  data.get('message'), data.get('canNotUseWaitForFree'))
+                  data.get('ticketType'), data.get('canNotUseWaitForFree'))
 
         if data.get('pass') is True:
             return data
 
-        # 명시적 거부 — 기다무 사용 불가
         if data.get('canNotUseWaitForFree'):
             raise NotReadableError(f'기다무 사용 불가: {data.get("message", "")}')
 
-        mt = (data.get('messageType') or '').upper()
-        msg = (data.get('message') or '').strip()
-        # pass=false 이면 라이센스 발급 안된 것으로 보고 거부.
-        # (mt=OK/msg=ok 인데 pass=false 인 응답이 와도 실제 viewer 단계에서 NO_LICENSE 로
-        #  떨어지므로 — 거부로 처리하는 게 정확. 카카오 BFF 의 새 응답 의미는 미상.)
-        raise NotReadableError(f'pass 거부 (pass=false mt={mt}): {msg}')
+        # 2) commit — 응답에서 받은 ticketType 그대로 보냄
+        tt = data.get('ticketType')
+        if not tt:
+            mt = (data.get('messageType') or '').upper()
+            msg = (data.get('message') or '').strip()
+            raise NotReadableError(
+                f'pass 거부 (ticketType 없음 mt={mt}): {msg}')
+
+        data2 = _post({'ticketType': tt})
+        self._log('info', 'pass commit ep=%s tt=%s pass=%s mt=%s',
+                  episode_id, tt, data2.get('pass'), data2.get('messageType'))
+        if data2.get('pass') is True:
+            return data2
+        mt2 = (data2.get('messageType') or '').upper()
+        msg2 = (data2.get('message') or '').strip()
+        raise NotReadableError(
+            f'pass commit 실패 (tt={tt} mt={mt2}): {msg2}')
 
     def get_episode(self, episode_id: int) -> Dict:
         s = self._session()
