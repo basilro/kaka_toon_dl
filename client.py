@@ -134,6 +134,9 @@ class KakaotoonClient:
         try:
             return r.json()
         except Exception:
+            # 4xx 같은 비JSON 응답은 raw text 그대로 보존 (디버깅용)
+            if 400 <= r.status_code < 600:
+                return {'__raw': r.text[:500], '__status': r.status_code}
             raise KakaotoonError(f'invalid JSON ({r.status_code}): {r.text[:200]}')
 
     def _check(self, body: Dict[str, Any], r: Optional[requests.Response] = None) -> Dict[str, Any]:
@@ -141,6 +144,19 @@ class KakaotoonClient:
         #   성공: {"data": ..., "meta": {...}}
         #   실패: {"errorCode": "...", "errorMessage": "..."} or HTTP 4xx/5xx
         if r is not None and r.status_code in (401, 403):
+            # 진짜 사유 확인을 위해 body 전체 로깅
+            try:
+                body_repr = json.dumps(body, ensure_ascii=False)[:400]
+            except Exception:
+                body_repr = str(body)[:400]
+            self._log('warning', 'HTTP %d url=%s body=%s',
+                      r.status_code, r.url, body_repr)
+            # errorCode 있으면 NOT_READABLE/AUTH 구분
+            if isinstance(body, dict):
+                ec = str(body.get('errorCode') or '').upper()
+                em = body.get('errorMessage') or ''
+                if 'NOT_READABLE' in ec or 'NO_TICKET' in ec or 'LOCKED' in ec:
+                    raise NotReadableError(f'{ec}: {em}')
             raise AuthRequiredError(f'HTTP {r.status_code}: 인증 필요 — 쿠키 재주입')
         if isinstance(body, dict) and body.get('errorCode'):
             ec = body.get('errorCode')
