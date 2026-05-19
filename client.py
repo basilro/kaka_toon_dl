@@ -421,7 +421,9 @@ class KakaotoonClient:
     # ---- 회차 열기 (티켓 사용) ----
     def pass_episode(self, episode_id: int) -> Dict:
         """회차 열람 등록 — 무료 회차면 그냥 통과, 기다무/대여권 회차면 차감.
-        응답: {pass, alreadyRented, canNotUseWaitForFree, messageType, ...}
+        과거 응답: {pass: bool, alreadyRented, canNotUseWaitForFree, messageType, message, ...}
+        2026-05 이후 일부 응답이 `messageType=OK, message=ok` 통합 형태로 옴 —
+        이 경우 `pass` 필드 자체가 없거나 false 인데 실제로는 통과한 상태.
         """
         s = self._session()
         s.headers['Content-Type'] = 'application/json'
@@ -429,13 +431,33 @@ class KakaotoonClient:
                    data='{}', timeout=15)
         body = self._check(self._json(r), r)
         data = body.get('data', {}) or {}
-        if not data.get('pass'):
-            # 통과 못함 — 사유 확인
-            mt = data.get('messageType', '')
-            msg = data.get('message', '')
-            if data.get('canNotUseWaitForFree'):
-                raise NotReadableError(f'기다무 사용 불가: {msg}')
-            raise NotReadableError(f'pass 실패 ({mt}): {msg}')
+        self._log('info', 'pass resp ep=%s pass=%s mt=%s msg=%s cnwff=%s',
+                  episode_id, data.get('pass'), data.get('messageType'),
+                  data.get('message'), data.get('canNotUseWaitForFree'))
+
+        # 명시적 거부 — 기다무 사용 불가
+        if data.get('canNotUseWaitForFree'):
+            raise NotReadableError(f'기다무 사용 불가: {data.get("message", "")}')
+
+        mt = (data.get('messageType') or '').upper()
+        msg = (data.get('message') or '').strip()
+
+        # 성공 케이스 (다양)
+        if data.get('pass') is True:
+            return data
+        if mt in ('OK', 'FREE_EPISODE', 'ALREADY_PASSED',
+                  'RENTAL_OK', 'POSSESSION_OK', 'WAIT_FOR_FREE_OK'):
+            return data
+        if msg.lower() == 'ok':
+            return data
+
+        # 명백 거부 단어
+        deny_words = ('NOT_READABLE', 'LOCKED', 'NEED_',
+                      'BUY_', 'NO_TICKET', 'INSUFFICIENT')
+        if any(w in mt for w in deny_words):
+            raise NotReadableError(f'pass 거부 ({mt}): {msg}')
+
+        # 모호한 응답 — 일단 통과 (다음 media-resources 에서 401/빈 응답이면 실패 처리됨)
         return data
 
     def get_episode(self, episode_id: int) -> Dict:
