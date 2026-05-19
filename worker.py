@@ -520,11 +520,12 @@ class Worker:
                     break
 
                 _auto_set(current_phase='downloading')
-                if self._download_one(title, content_id, ep, kind='waitfree') == 'downloaded':
+                result = self._download_one(title, content_id, ep, kind='waitfree')
+                if result == 'downloaded':
                     downloaded_count += 1
                     wf_used += 1
                 else:
-                    P.logger.info('[%s] 기다무 회차 다운 실패 — 종료', title)
+                    P.logger.info('[%s] 기다무 회차 다운 실패(%s) — 종료', title, result)
                     break
         elif waitfree_eps:
             P.logger.info('[%s] 기다무 사용 Off — %d개 스킵', title, len(waitfree_eps))
@@ -542,10 +543,11 @@ class Worker:
                     break
                 _auto_set(current_phase='downloading',
                           current_episode=ep.get('title', ''))
-                if self._download_one(title, content_id, ep, kind='ticket') == 'downloaded':
+                result = self._download_one(title, content_id, ep, kind='ticket')
+                if result == 'downloaded':
                     downloaded_count += 1
                 else:
-                    P.logger.info('[%s] 유료 회차 다운 실패 — 종료', title)
+                    P.logger.info('[%s] 유료 회차 다운 실패(%s) — 종료', title, result)
                     break
 
         return 'downloaded' if downloaded_count else 'skipped'
@@ -811,10 +813,16 @@ class Worker:
                 self.client.pass_episode(episode_id)
             except NotReadableError as e:
                 rec.status = 'skipped_no_ticket'; rec.error_msg = str(e)
-                db.session.commit(); return 'skipped'
+                db.session.commit()
+                P.logger.warning('[%s] %s pass(%s) 거부: %s',
+                                 content_title, episode_title, kind, e)
+                return 'skipped'
             except KakaotoonError as e:
                 rec.status = 'failed'; rec.error_msg = f'pass: {e}'
-                db.session.commit(); return 'failed'
+                db.session.commit()
+                P.logger.warning('[%s] %s pass(%s) 실패: %s',
+                                 content_title, episode_title, kind, e)
+                return 'failed'
         else:
             # 무료도 pass 한 번 호출해두면 history 마킹됨 — 실패해도 무시
             try:
@@ -828,14 +836,21 @@ class Worker:
             mr = self.client.get_media_resources(episode_id)
         except KakaotoonError as e:
             rec.status = 'failed'; rec.error_msg = f'media-resources: {e}'
-            db.session.commit(); return 'failed'
+            db.session.commit()
+            P.logger.warning('[%s] %s media-resources 실패: %s',
+                             content_title, episode_title, e)
+            return 'failed'
         media = mr.get('media') or {}
         files = media.get('files') or []
         aid = media.get('aid'); zid = media.get('zid')
         req_meta = mr.get('_req') or {}
         if not files:
             rec.status = 'failed'; rec.error_msg = 'no media files'
-            db.session.commit(); return 'failed'
+            db.session.commit()
+            P.logger.warning('[%s] %s media-resources files 비어있음 (aid=%s zid=%s)',
+                             content_title, episode_title,
+                             'Y' if aid else 'N', 'Y' if zid else 'N')
+            return 'failed'
 
         # 복호화에 필요한 userId — 첫 회차 진입 시 1회 조회
         if self.user_id is None:
