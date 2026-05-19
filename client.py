@@ -438,8 +438,6 @@ class KakaotoonClient:
     def pass_episode(self, episode_id: int) -> Dict:
         """회차 열람 등록 — 무료 회차면 그냥 통과, 기다무/대여권 회차면 차감.
         과거 응답: {pass: bool, alreadyRented, canNotUseWaitForFree, messageType, message, ...}
-        2026-05 이후 일부 응답이 `messageType=OK, message=ok` 통합 형태로 옴 —
-        이 경우 `pass` 필드 자체가 없거나 false 인데 실제로는 통과한 상태.
         """
         s = self._session()
         s.headers['Content-Type'] = 'application/json'
@@ -451,30 +449,19 @@ class KakaotoonClient:
                   episode_id, data.get('pass'), data.get('messageType'),
                   data.get('message'), data.get('canNotUseWaitForFree'))
 
+        if data.get('pass') is True:
+            return data
+
         # 명시적 거부 — 기다무 사용 불가
         if data.get('canNotUseWaitForFree'):
             raise NotReadableError(f'기다무 사용 불가: {data.get("message", "")}')
 
         mt = (data.get('messageType') or '').upper()
         msg = (data.get('message') or '').strip()
-
-        # 성공 케이스 (다양)
-        if data.get('pass') is True:
-            return data
-        if mt in ('OK', 'FREE_EPISODE', 'ALREADY_PASSED',
-                  'RENTAL_OK', 'POSSESSION_OK', 'WAIT_FOR_FREE_OK'):
-            return data
-        if msg.lower() == 'ok':
-            return data
-
-        # 명백 거부 단어
-        deny_words = ('NOT_READABLE', 'LOCKED', 'NEED_',
-                      'BUY_', 'NO_TICKET', 'INSUFFICIENT')
-        if any(w in mt for w in deny_words):
-            raise NotReadableError(f'pass 거부 ({mt}): {msg}')
-
-        # 모호한 응답 — 일단 통과 (다음 media-resources 에서 401/빈 응답이면 실패 처리됨)
-        return data
+        # pass=false 이면 라이센스 발급 안된 것으로 보고 거부.
+        # (mt=OK/msg=ok 인데 pass=false 인 응답이 와도 실제 viewer 단계에서 NO_LICENSE 로
+        #  떨어지므로 — 거부로 처리하는 게 정확. 카카오 BFF 의 새 응답 의미는 미상.)
+        raise NotReadableError(f'pass 거부 (pass=false mt={mt}): {msg}')
 
     def get_episode(self, episode_id: int) -> Dict:
         s = self._session()
