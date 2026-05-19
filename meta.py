@@ -33,6 +33,20 @@ XML_TEMPLATE = '''<?xml version="1.0"?>
 </ComicInfo>'''
 
 
+_IMG_EXT_RE = re.compile(r'\.(webp|jpe?g|png|gif|bmp)$', re.I)
+
+
+def _ensure_webp_ext(url: str) -> str:
+    """확장자 없는 cover URL 에 `.webp` 부여. 쿼리스트링은 보존."""
+    if not url:
+        return url
+    base, sep, query = url.partition('?')
+    tail = base.rsplit('/', 1)[-1]
+    if _IMG_EXT_RE.search(tail):
+        return url
+    return base + '.webp' + (sep + query if sep else '')
+
+
 def _xml_escape(s: str) -> str:
     s = s or ''
     return (s.replace('&', '&amp;')
@@ -75,13 +89,15 @@ def _normalize(content_data: Dict[str, Any]) -> Dict[str, Any]:
     is_completed = bool(cd.get('isStopContent') or cd.get('completed'))
     notes = '완결' if is_completed else '연재'
 
-    # 표지 — 캐릭터컷 우선 (사용자 선택)
-    cover_url = (cd.get('featuredCharacterImageA')
-                 or cd.get('backgroundImage')
-                 or cd.get('titleImageA')
-                 or cd.get('shareImg')
-                 or cd.get('poster')
-                 or '')
+    # 표지 후보 — 캐릭터컷 우선 (사용자 선택). 첫 후보 실패 시 fallback.
+    # kakao API 응답은 확장자가 빠진 URL을 반환 — `.webp` 자동 부여.
+    cover_candidates = []
+    for k in ('featuredCharacterImageA', 'featuredCharacterImageB',
+              'backgroundImage', 'titleImageA', 'titleImageB',
+              'shareImg', 'poster'):
+        u = (cd.get(k) or '').strip()
+        if u and u not in cover_candidates:
+            cover_candidates.append(_ensure_webp_ext(u))
 
     seo = (cd.get('seoId') or '').strip()
     cid = cd.get('id')
@@ -100,7 +116,8 @@ def _normalize(content_data: Dict[str, Any]) -> Dict[str, Any]:
         'tags': '카카오웹툰',
         'summary': summary,
         'notes': notes,
-        'cover_url': cover_url,
+        'cover_url': cover_candidates[0] if cover_candidates else '',
+        'cover_urls': cover_candidates,
         'web': web,
     }
 
@@ -230,9 +247,11 @@ def ensure_meta(content_folder: str,
 
     if need_cover:
         nd = _normalize(content_data)
-        if _download_cover(nd['cover_url'], cover_path,
-                           session=session, logger=logger):
-            result['cover'] = True
-            if logger:
-                logger.info('cover.jpg 생성: %s', cover_path)
+        urls = nd.get('cover_urls') or ([nd['cover_url']] if nd.get('cover_url') else [])
+        for u in urls:
+            if _download_cover(u, cover_path, session=session, logger=logger):
+                result['cover'] = True
+                if logger:
+                    logger.info('cover.jpg 생성: %s', cover_path)
+                break
     return result
