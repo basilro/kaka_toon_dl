@@ -100,3 +100,23 @@ def build_cookie_expired_message() -> str:
     return ('[카카오웹툰] 쿠키 만료 감지\n'
             '설정 페이지에서 쿠키를 재주입해주세요.\n'
             '(자동 다운로드가 중단됩니다)')
+
+
+def build_notice_failure_message(notice_title: str, failed: List[Dict]) -> str:
+    """유료화/종료 공지 작품 중 자동 다운에 실패한 항목 알림.
+
+    failed: [{'title': str, 'reason': str}, ...]
+    반환: 발송용 텍스트 (failed 비어있으면 빈 문자열).
+    """
+    if not failed:
+        return ''
+    lines = [f'[카카오웹툰] 유료화 공지 다운 실패 — {len(failed)}건']
+    if notice_title:
+        lines.append(f'(공지: {notice_title})')
+    lines.append('')
+    lines.append('아래 작품은 자동 다운에 실패했습니다. 수동 확인이 필요합니다:')
+    for it in failed:
+        title = it.get('title') or '(제목 미상)'
+        reason = it.get('reason') or '실패'
+        lines.append(f'- {title} — {reason}')
+    return '\n'.join(lines)

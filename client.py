@@ -294,12 +294,73 @@ class KakaotoonClient:
         body = self._check(self._json(r), r)
         return (body.get('data') or {}).get('content', []) or []
 
-    def find_content(self, title: str) -> Optional[Dict]:
-        items = self.search_content(title)
+    # 제목 부가표기: [19세 완전판] (완전판) 【성인】 등 — 검색/비교 시 제거
+    _ANNOT_RE = re.compile(r'[\[\(（【][^\]\)）】]*[\]\)）】]')
+
+    @classmethod
+    def _normalize_title(cls, t: str) -> str:
+        """제목 비교/검색용 정규화 — 괄호 부가표기·공백 제거 후 소문자."""
+        t = cls._ANNOT_RE.sub('', t or '')
+        t = re.sub(r'\s+', '', t)
+        return t.lower()
+
+    @classmethod
+    def _pick_match(cls, title: str, items: List[Dict]) -> Optional[Dict]:
+        """검색 결과(items)에서 title 에 해당하는 작품 선택 (없으면 None).
+
+        우선순위: 정확 일치 → 정규화 일치(adult 힌트 시 adult=True 우선)
+                → 정규화 부분 포함. 무관하면 None (오매칭 방지).
+        """
+        if not items:
+            return None
+        norm_target = cls._normalize_title(title)
+        prefer_adult = bool(re.search(r'19\s*세|완전판|성인', title or ''))
+        # 1) 정확 일치
         for it in items:
             if it.get('title') == title:
                 return it
-        return items[0] if items else None
+        # 2) 정규화 일치
+        norm_matches = [it for it in items
+                        if cls._normalize_title(it.get('title') or '') == norm_target]
+        if norm_matches:
+            if prefer_adult:
+                for it in norm_matches:
+                    if it.get('adult'):
+                        return it
+            return norm_matches[0]
+        # 3) 정규화 부분 포함 (한쪽이 다른 쪽을 포함)
+        for it in items:
+            nt = cls._normalize_title(it.get('title') or '')
+            if nt and (nt in norm_target or norm_target in nt):
+                return it
+        return None
+
+    def find_content(self, title: str) -> Optional[Dict]:
+        """제목으로 작품 검색 + 매칭.
+
+        '나쁜 X, 나쁜 X [19세 완전판]' 처럼 괄호 부가표기가 붙으면 원제목
+        검색이 0건이 되므로, 부가표기를 떼고 재검색 + 정규화 비교로 매칭한다.
+        """
+        base = self._ANNOT_RE.sub('', title or '').strip()
+        keywords: List[str] = []
+        for kw in (title, base):
+            kw = (kw or '').strip()
+            if kw and kw not in keywords:
+                keywords.append(kw)
+        for kw in keywords:
+            try:
+                items = self.search_content(kw)
+            except KakaotoonError:
+                items = []
+            if not items:
+                continue
+            hit = self._pick_match(title, items)
+            if hit:
+                return hit
+            # 원제목으로 검색했는데 매칭 실패 → 첫 결과 폴백(기존 동작 유지)
+            if kw == title:
+                return items[0]
+        return None
 
     def get_content(self, content_id: int) -> Dict:
         s = self._session()
