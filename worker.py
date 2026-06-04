@@ -9,7 +9,8 @@ from .client import (KakaotoonClient, KakaotoonError,
                      AuthRequiredError, NotReadableError)
 from .model import ModelKakaotoonItem
 from .notify import (send_webhook, build_download_summary,
-                     build_cookie_expired_message)
+                     build_cookie_expired_message,
+                     build_notice_failure_message)
 from . import meta as meta_mod
 from .setup import *  # P, db, logger
 
@@ -343,6 +344,7 @@ class Worker:
             return 0
 
         processed = 0
+        failed_works: List[Dict[str, str]] = []   # 알림용 — 검색/처리 실패분
         for it in targets:
             title = it['title']
             _auto_set(current_title=f'[공지] {title}',
@@ -355,19 +357,69 @@ class Worker:
                     processed += 1
                 elif got == 'skipped':
                     summary['skipped'] += 1; _auto_summary_inc('skipped')
-                else:
+                elif got == 'notfound':
                     summary['failed'] += 1; _auto_summary_inc('failed')
+                    failed_works.append({'title': title, 'reason': '검색 매칭 실패'})
+                else:  # 'failed'
+                    summary['failed'] += 1; _auto_summary_inc('failed')
+                    failed_works.append({'title': title, 'reason': '회차 조회/처리 실패'})
             except Exception as e:
                 P.logger.warning('공지 작품 %r 처리 실패: %s', title, e)
                 summary['failed'] += 1; _auto_summary_inc('failed')
+                failed_works.append({'title': title, 'reason': f'예외: {e}'})
+
+        # 실패 작품 웹훅 알림 (신규 실패분만 — 매 실행 스팸 방지)
+        self._notify_notice_failures(paid_notice.get('id'),
+                                     paid_notice.get('title'), failed_works)
         return processed
 
+    def _notify_notice_failures(self, notice_id, notice_title,
+                                failed_works: List[Dict[str, str]]) -> None:
+        """공지 작품 다운 실패분을 웹훅으로 1회 알림.
+
+        같은 공지(id) 내에서 이미 알린 작품은 다시 알리지 않는다 — 매 스케줄
+        실행마다 검색실패가 반복돼도 알림은 신규분만 발송 (스팸 방지).
+        """
+        if not failed_works or not self.notify_download_url:
+            return
+        import json as _json
+        nid = str(notice_id)
+        try:
+            raw = P.ModelSetting.get('notice_fail_notified') or ''
+            state = _json.loads(raw) if raw else {}
+            if not isinstance(state, dict):
+                state = {}
+        except Exception:
+            state = {}
+        already = set(state.get(nid) or [])
+        fresh = [w for w in failed_works if w.get('title') not in already]
+        if not fresh:
+            return
+        try:
+            msg = build_notice_failure_message(notice_title or '', fresh)
+            if msg and send_webhook(self.notify_download_url, msg):
+                merged = sorted(already | {w['title'] for w in fresh})
+                P.ModelSetting.set(
+                    'notice_fail_notified',
+                    _json.dumps({nid: merged}, ensure_ascii=False))
+                P.logger.info('[공지] 실패 작품 알림 발송: %d건', len(fresh))
+        except Exception as e:
+            P.logger.warning('[공지] 실패 작품 알림 예외: %s', e)
+
     def _process_notice_content(self, title: str) -> str:
-        """공지 작품 1개 — 검색 → free/owned 회차 모두 완결 폴더에 다운."""
+        """공지 작품 1개 — 검색 → 무료/보유 회차 + 보유 티켓 유료회차를 완결 폴더에 다운.
+
+        반환: 'downloaded' | 'skipped' | 'notfound' | 'failed'
+          - notfound: 검색 매칭 실패 (작품 자체를 못 찾음 → 알림 대상)
+          - failed:   회차 조회 등 처리 실패
+
+        기다무(waitfree) 회차는 의도적으로 제외 — 기다무 티켓을 소진하지 않는다.
+        유료(pay) 회차는 '보유 티켓'(대여권/소장권)이 있을 때만 받는다.
+        """
         item = self.client.find_content(title)
         if not item:
             P.logger.warning('[공지] %s 검색 매칭 실패', title)
-            return 'failed'
+            return 'notfound'
         content_id = item['id']
         display = item.get('title') or title
 
@@ -391,8 +443,9 @@ class Worker:
         if not eps:
             return 'failed'
 
-        # 무료/보유 회차만 (티켓 차감 없이)
+        # 분류: 무료/보유(free,unlocked) + 유료(pay). 기다무는 제외.
         unlocked: List[Dict] = []
+        pay_eps: List[Dict] = []
         for ep in eps:
             eid = ep.get('id')
             if not eid:
@@ -401,21 +454,51 @@ class Worker:
                    .filter_by(episode_id=eid).first())
             if rec and rec.status == 'completed':
                 continue
-            if KakaotoonClient.episode_availability(ep) in ('free', 'unlocked'):
+            avail = KakaotoonClient.episode_availability(ep)
+            if avail in ('free', 'unlocked'):
                 unlocked.append(ep)
+            elif avail == 'pay':
+                pay_eps.append(ep)
         unlocked.sort(key=KakaotoonClient.episode_no)
-        if not unlocked:
+        pay_eps.sort(key=KakaotoonClient.episode_no)
+        if not unlocked and not pay_eps:
             P.logger.info('[공지] %s 새로 받을 무료/보유 회차 없음', display)
             return 'skipped'
+        P.logger.info('[공지] %s 미수신 — 무료/보유 %d개, 유료(보유티켓) %d개',
+                      display, len(unlocked), len(pay_eps))
 
         downloaded = 0
         _auto_set(current_phase='downloading')
+
+        # 1) 무료/보유 회차 — 제한 없이
         for ep in unlocked:
             _auto_set(current_episode=ep.get('title', ''),
                       current_pages_done=0, current_pages_total=0)
             if self._download_one(display, content_id, ep,
                                   kind='free', group='complete') == 'downloaded':
                 downloaded += 1
+
+        # 2) 유료 회차 — 보유(대여/소장) 티켓이 있을 때만. 기다무 티켓 충전은 안 함.
+        for ep in pay_eps:
+            try:
+                av = self.client.get_available_tickets(content_id)
+            except KakaotoonError as e:
+                P.logger.warning('[공지] %s available-tickets 실패: %s', display, e)
+                break
+            if int(av.get('ticketCount') or 0) <= 0:
+                P.logger.info('[공지] %s 보유 티켓 0 — 유료 회차 다운 종료', display)
+                break
+            _auto_set(current_phase='downloading',
+                      current_episode=ep.get('title', ''),
+                      current_pages_done=0, current_pages_total=0)
+            result = self._download_one(display, content_id, ep,
+                                        kind='ticket', group='complete')
+            if result == 'downloaded':
+                downloaded += 1
+            else:
+                P.logger.info('[공지] %s 유료 회차 다운 실패(%s) — 종료', display, result)
+                break
+
         return 'downloaded' if downloaded else 'skipped'
 
     # ---- per item ----

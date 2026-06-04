@@ -32,6 +32,7 @@ class ModuleBasic(PluginModuleBase):
             'notify_webhook_cookie': '',       # 쿠키 만료 시 발송할 웹훅
             'notify_webhook_download': '',     # 다운로드 완료 요약 발송 웹훅
             'cookie_expired_notified': 'False',# 쿠키 만료 알림 1회 발송 플래그
+            'notice_fail_notified': '',        # 공지 작품 다운 실패 알림 중복방지 상태(JSON)
             'use_proxy': 'False',              # 프록시 사용 여부
             'proxy_url': '',                   # warproxy 등. use_proxy=True + 값 있을 때만 사용
             'use_compress': 'False',           # 정상 다운 완료 시 회차 폴더 ZIP 으로 압축 + 원본 삭제
