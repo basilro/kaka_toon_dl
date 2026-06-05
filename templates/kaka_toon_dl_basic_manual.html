@@ -2,13 +2,15 @@
 {% block content %}
 
 <div>
-  {{ macros.setting_input_text_and_buttons('manual_url', '카카오웹툰 작품 URL',
-      [['manualRunBtn',    '시작'],
-       ['manualCancelBtn', '취소']],
+  {{ macros.setting_input_text_and_buttons('manual_url', '카카오웹툰 작품/회차 URL',
+      [['manualAnalyzeBtn',  '분석'],
+       ['manualDownloadBtn', '선택 다운로드'],
+       ['manualCancelBtn',   '취소']],
       value='',
-      desc=['예) https://webtoon.kakao.com/content/홍도/1121 (viewer URL 도 가능)',
+      desc=['예) 작품 전체: https://webtoon.kakao.com/content/홍도/1121',
+            '예) 한 회차만: https://webtoon.kakao.com/viewer/1121/{episodeId} (그 회차만 자동 선택)',
             '예) 1121 (contentId 숫자만)',
-            'URL 입력 후 시작 → 자동으로 작품 분석 + 보유/무료 회차 순차 다운로드. 잠금 회차는 자동 스킵.']) }}
+            '분석 → 받을 회차 체크 → 선택 다운로드. 무료·미수신만 선택 가능(유료/잠금/이미받음 제외).']) }}
 
   <div class="container-fluid" style="margin-top:10px;">
     <div class="row" style="padding:6px 0;">
@@ -30,8 +32,9 @@
 
   {{ macros.m_hr_head_top() }}
   {{ macros.m_row_start('0') }}
+  <div class="col-sm-1" style="text-align:center;"><input type="checkbox" id="m_check_all" title="전체 선택"/></div>
   <div class="col-sm-1" style="text-align:center;"><strong>#</strong></div>
-  <div class="col-sm-5"><strong>회차</strong></div>
+  <div class="col-sm-4"><strong>회차</strong></div>
   <div class="col-sm-2" style="text-align:center;"><strong>구분</strong></div>
   <div class="col-sm-2" style="text-align:center;"><strong>진행</strong></div>
   <div class="col-sm-2" style="text-align:center;"><strong>상태</strong></div>
@@ -54,20 +57,34 @@ function availBadge(a){
 function stateBadge(s){
   var m = {'pending':['light','대기'],'downloading':['info','다운중'],
            'completed':['success','완료'],'skipped':['secondary','스킵'],
-           'failed':['danger','실패']};
+           'failed':['danger','실패'],'excluded':['light','제외']};
   var v = m[s] || ['light', s || '-'];
   return '<span class="badge badge-' + v[0] + '">' + v[1] + '</span>';
 }
 
-function renderEpisodes(eps, currentIdx){
+// interactive=true (분석 직후): 체크박스 활성. focusEid 있으면 그 회차만 체크,
+//   없으면 selectable(무료·미수신) 전체 체크.
+// interactive=false (다운 진행/완료): 체크박스 비활성, 선택됐던 회차만 체크 표시.
+function renderEpisodes(eps, currentIdx, interactive, focusEid){
   var html = '';
   for (var i = 0; i < eps.length; i++){
     var e = eps[i];
     var pages = (e.pages_total ? (e.pages_done + '/' + e.pages_total) : '-');
     var rowStyle = (i === currentIdx) ? ' style="background:#fff3cd; color:#212529;"' : '';
-    html += '<div class="row"' + rowStyle + ' style="padding:3px 0; border-bottom:1px solid #eee;">';
+    var checked, disabled;
+    if (interactive){
+      disabled = !e.selectable;
+      checked = e.selectable && (focusEid ? (e.episode_id === focusEid) : true);
+    } else {
+      disabled = true;
+      checked = (e.state !== 'excluded');
+    }
+    var cb = '<input type="checkbox" class="m-ep-check" data-eid="' + e.episode_id + '"'
+           + (checked ? ' checked' : '') + (disabled ? ' disabled' : '') + '/>';
+    html += '<div class="row"' + rowStyle + ' style="padding:3px 0; border-bottom:1px solid #eee; align-items:center;">';
+    html += '<div class="col-sm-1" style="text-align:center;">' + cb + '</div>';
     html += '<div class="col-sm-1" style="text-align:center;">' + (e.episode_no || '-') + '</div>';
-    html += '<div class="col-sm-5" style="word-break:break-all;"><small>' + (e.title || '-') + '</small></div>';
+    html += '<div class="col-sm-4" style="word-break:break-all;"><small>' + (e.title || '-') + '</small></div>';
     html += '<div class="col-sm-2" style="text-align:center;">' + availBadge(e.availability) + '</div>';
     html += '<div class="col-sm-2" style="text-align:center;">' + pages + '</div>';
     html += '<div class="col-sm-2" style="text-align:center;">' + stateBadge(e.state)
@@ -94,7 +111,7 @@ function applyState(st){
   bar.innerText = pct + '%';
   if (st.status === 'running') bar.classList.add('progress-bar-animated');
   else bar.classList.remove('progress-bar-animated');
-  renderEpisodes(st.episodes || [], st.current_index);
+  renderEpisodes(st.episodes || [], st.current_index, false, null);
 
   if (st.status === 'running' || st.status === 'analyzing') {
     if (!pollTimer) pollTimer = setInterval(pollProgress, 1500);
@@ -115,18 +132,48 @@ $(document).ready(function(){
   pollProgress();
 });
 
-$('body').on('click', '#manualRunBtn', function(e){
+function syncCheckAll(){
+  var boxes = $('.m-ep-check:not(:disabled)');
+  var checked = boxes.filter(':checked');
+  $('#m_check_all').prop('checked', boxes.length > 0 && boxes.length === checked.length);
+}
+
+$('body').on('click', '#manualAnalyzeBtn', function(e){
   e.preventDefault();
   var url = ($('#manual_url').val() || '').trim();
   if (!url) { $.notify('URL을 입력하세요', {className: 'warn'}); return; }
-  $.notify('분석 + 다운로드 시작...', {className: 'info'});
+  $.notify('분석 중...', {className: 'info'});
   $.post('/' + package_name + '/ajax/basic/command',
-         {command: 'mrun', arg1: url, url: url},
+         {command: 'manalyze', arg1: url, url: url},
          function(data){
     if (data && data.ret === 'success'){
-      $.notify('작품: ' + (data.content_title || '?')
-               + ' / 다운로드 가능 ' + data.will_download + '/' + data.total,
-               {className: 'success'});
+      $('#m_series').text(data.content_title || '-');
+      $('#m_status').text('분석됨');
+      var msg = '전체 ' + data.total + '개 / 받기 가능(무료·미수신) ' + data.will_download + '개';
+      if (data.focus_note) msg += ' — ' + data.focus_note;
+      $('#m_message').text(msg);
+      renderEpisodes(data.episodes || [], -1, true, data.focus_eid || null);
+      syncCheckAll();
+    } else {
+      $.notify((data && data.msg) || '분석 실패', {className: 'error'});
+    }
+  }).fail(function(xhr){
+    $.notify('서버 호출 실패: ' + xhr.status + ' ' + xhr.statusText, {className: 'error'});
+  });
+});
+
+$('body').on('click', '#manualDownloadBtn', function(e){
+  e.preventDefault();
+  var eids = $('.m-ep-check:checked').map(function(){
+    return $(this).data('eid');
+  }).get();
+  if (eids.length === 0) { $.notify('받을 회차를 선택하세요', {className: 'warn'}); return; }
+  if (!confirm(eids.length + '개 회차를 다운로드할까요?')) return;
+  $.post('/' + package_name + '/ajax/basic/command',
+         {command: 'mdownload', arg1: eids.join(',')},
+         function(data){
+    if (data && data.ret === 'success'){
+      $.notify(data.msg || '시작됨', {className: 'success'});
     } else {
       $.notify((data && data.msg) || '실행 실패', {className: 'error'});
     }
@@ -135,6 +182,12 @@ $('body').on('click', '#manualRunBtn', function(e){
     $.notify('서버 호출 실패: ' + xhr.status + ' ' + xhr.statusText, {className: 'error'});
   });
 });
+
+$('body').on('change', '#m_check_all', function(){
+  $('.m-ep-check:not(:disabled)').prop('checked', this.checked);
+});
+
+$('body').on('change', '.m-ep-check', function(){ syncCheckAll(); });
 
 $('body').on('click', '#manualCancelBtn', function(e){
   e.preventDefault();
