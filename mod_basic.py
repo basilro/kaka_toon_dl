@@ -120,7 +120,7 @@ class ModuleBasic(PluginModuleBase):
                 ret = self.do_action_cleanup_keys_json()
             elif command == 'compress_all':
                 ret = self.do_action_compress_all()
-            elif command == 'mrun':
+            elif command == 'manalyze':
                 from . import manual_worker
                 url = (arg1 or '').strip()
                 if not url and req is not None:
@@ -129,7 +129,15 @@ class ModuleBasic(PluginModuleBase):
                                or req.args.get('url') or '').strip()
                     except Exception:
                         pass
-                ret = manual_worker.run_with_url(url)
+                ret = manual_worker.analyze(url)
+            elif command == 'mdownload':
+                from . import manual_worker
+                eids = []
+                for x in (arg1 or '').split(','):
+                    x = x.strip()
+                    if x.isdigit():
+                        eids.append(int(x))
+                ret = manual_worker.start_selected(eids)
             elif command == 'mcancel':
                 from . import manual_worker
                 manual_worker.cancel()

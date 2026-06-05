@@ -110,62 +110,79 @@ def analyze(url_or_id: str) -> Dict[str, Any]:
     if not eps:
         return {'ret': 'fail', 'msg': '회차 없음'}
 
+    # 이미 받은(completed) 회차 — 기본 체크 제외 + 체크 불가 표시용 (episode_id 기준)
+    completed_eids = set()
+    try:
+        eids = [ep.get('id') for ep in eps]
+        eids = [e for e in eids if e is not None]
+        if eids:
+            for r in (db.session.query(ModelKakaotoonItem)
+                      .filter(ModelKakaotoonItem.episode_id.in_(eids)).all()):
+                if r.status == 'completed' and r.episode_id is not None:
+                    completed_eids.add(r.episode_id)
+    except Exception as e:
+        P.logger.warning('[manual] completed 조회 실패(계속): %s', e)
+
+    # 전체 회차를 표시용으로 모두 반환. selectable = 무료/언락 & 미수신.
     all_eps = []
     for ep in eps:
+        eid = ep.get('id')
         avail = KakaotoonClient.episode_availability(ep)
+        completed = eid in completed_eids
         all_eps.append({
-            'episode_id': ep.get('id'),
+            'episode_id': eid,
             'episode_no': KakaotoonClient.episode_no(ep),
             'title': ep.get('title', ''),
             'availability': avail,
+            'completed': completed,
+            'selectable': (avail in ('free', 'unlocked')) and not completed,
             'state': 'pending',
             'pages_done': 0,
             'pages_total': 0,
             'save_dir': '',
             'error': '',
         })
-    # 다운로드 가능 후보: 무료/소장
-    episodes = [e for e in all_eps if e['availability'] in ('free', 'unlocked')]
-    episodes.sort(key=lambda e: (e['episode_no'], e['episode_id'] or 0))
-    will_download = len(episodes)
+    all_eps.sort(key=lambda e: (e['episode_no'], e['episode_id'] or 0))
+    will_download = sum(1 for e in all_eps if e['selectable'])
+
+    # 뷰어 URL(/viewer/{contentId}/{episodeId})이면 그 회차만 자동 선택(focus).
+    focus_eid = KakaotoonClient.extract_episode_id(url_or_id)
+    focus_note = ''
+    if focus_eid is not None:
+        match = next((e for e in all_eps if e['episode_id'] == focus_eid), None)
+        if match is None:
+            focus_note = f'지정한 회차(eid {focus_eid}) 없음 — 받기 가능 전체 선택'
+            focus_eid = None
+        elif not match['selectable']:
+            focus_note = ('지정한 회차는 이미 받음 — 받기 가능 전체 선택'
+                          if match['completed']
+                          else '지정한 회차는 유료/잠금 — 받을 수 없음')
+            focus_eid = None
 
     _reset_state()
     _set(status='idle',
-         message=f'분석 완료 — 전체 {len(all_eps)}개 중 다운로드 가능 {will_download}개',
+         message=(f'분석 완료 — 전체 {len(all_eps)}개, '
+                  f'받기 가능(무료·미수신) {will_download}개'),
          content_id=content_id, content_title=content_title,
-         episodes=episodes, total_to_download=will_download)
-    P.logger.info('[manual] analyze END content=%r total=%d will_download=%d',
-                  content_title, len(all_eps), will_download)
+         episodes=all_eps, total_to_download=0)
+    P.logger.info('[manual] analyze END content=%r total=%d selectable=%d focus_eid=%s',
+                  content_title, len(all_eps), will_download, focus_eid)
     return {
         'ret': 'success',
         'content_id': content_id,
         'content_title': content_title,
-        'episodes': episodes,
+        'episodes': all_eps,
         'will_download': will_download,
         'total': len(all_eps),
+        'focus_eid': focus_eid,
+        'focus_note': focus_note,
     }
 
 
-def run_with_url(url_or_id: str) -> Dict[str, Any]:
-    P.logger.info('[manual] run_with_url BEGIN url=%r', url_or_id)
-    if is_running():
-        return {'ret': 'fail', 'msg': '이미 실행 중'}
-    ar = analyze(url_or_id)
-    if ar.get('ret') != 'success':
-        return ar
-    sr = start()
-    return {
-        'ret': sr.get('ret', 'fail'),
-        'msg': sr.get('msg', ''),
-        'content_id': ar.get('content_id'),
-        'content_title': ar.get('content_title'),
-        'will_download': ar.get('will_download'),
-        'total': ar.get('total'),
-    }
-
-
-def start() -> Dict[str, Any]:
+def start_selected(selected_eids: List[int]) -> Dict[str, Any]:
+    """analyze 로 만든 목록에서 선택된 무료/언락 회차(episode_id)만 다운로드."""
     global _thread
+    P.logger.info('[manual] start_selected BEGIN eids=%s', selected_eids)
     if is_running():
         return {'ret': 'fail', 'msg': '이미 실행 중'}
     with _state_lock:
@@ -175,15 +192,42 @@ def start() -> Dict[str, Any]:
     if not download_root:
         return {'ret': 'fail', 'msg': 'download_path 미설정'}
 
+    sel = set(int(e) for e in (selected_eids or []))
+    with _state_lock:
+        targets = [idx for idx, ep in enumerate(_state['episodes'])
+                   if ep.get('episode_id') in sel and ep.get('selectable')]
+    if not targets:
+        return {'ret': 'fail',
+                'msg': '선택된 받기 가능 회차 없음 (무료·미수신만 선택 가능)'}
+
+    # 전역 락 — 자동/압축/메타 작업과 절대 겹치지 않게 (회차 폴더 zip+삭제와
+    # 다운로드가 겹쳐 폴더가 사라지는 ENOENT 사고 방지). _run 의 finally 에서 해제.
+    from . import worker as _wkr
+    if not _wkr.try_acquire_run_lock():
+        return {'ret': 'fail',
+                'msg': '자동 다운로드/압축 등 다른 작업이 실행 중 — 끝난 뒤 다시'}
+
+    target_set = set(targets)
+    with _state_lock:
+        for idx, ep in enumerate(_state['episodes']):
+            if idx in target_set:
+                ep['state'] = 'pending'; ep['error'] = ''
+                ep['pages_done'] = 0; ep['pages_total'] = 0
+            else:
+                ep['state'] = 'excluded'
+
     _cancel_flag.clear()
-    _set(status='running', message='다운로드 시작', started_at=datetime.now().isoformat(),
-         finished_at=None, current_index=-1, completed=0, skipped=0, failed=0)
-    _thread = threading.Thread(target=_run, args=(download_root,), daemon=True)
+    _set(status='running', message='선택 다운로드 시작',
+         started_at=datetime.now().isoformat(), finished_at=None,
+         current_index=-1, completed=0, skipped=0, failed=0,
+         total_to_download=len(targets))
+    _thread = threading.Thread(target=_run, args=(download_root, targets),
+                               daemon=True)
     _thread.start()
-    return {'ret': 'success', 'msg': '시작됨'}
+    return {'ret': 'success', 'msg': f'{len(targets)}개 회차 다운로드 시작'}
 
 
-def _run(download_root: str):
+def _run(download_root: str, target_indices: List[int]):
     with F.app.app_context():
         try:
             cookies_json = (P.ModelSetting.get('cookies_json') or '').strip()
@@ -209,15 +253,17 @@ def _run(download_root: str):
             except Exception as e:
                 P.logger.warning('[manual] ensure_meta 예외(계속): %s', e)
 
-            for idx, ep in enumerate(episodes):
+            total = len(target_indices)
+            for n, idx in enumerate(target_indices, start=1):
                 if _cancel_flag.is_set():
                     _set(status='canceled',
                          finished_at=datetime.now().isoformat(),
                          message='취소됨')
                     return
+                ep = episodes[idx]
                 _set(current_index=idx)
                 P.logger.info('[manual] _run [%d/%d] %s avail=%s eid=%s',
-                              idx + 1, len(episodes), ep.get('title'),
+                              n, total, ep.get('title'),
                               ep.get('availability'), ep.get('episode_id'))
                 ok = _download_episode(cli, content_id, content_title,
                                        idx, ep, download_root)
@@ -239,6 +285,9 @@ def _run(download_root: str):
             P.logger.error(traceback.format_exc())
             _set(status='error', finished_at=datetime.now().isoformat(),
                  message=f'에러: {e}')
+        finally:
+            from . import worker as _wkr
+            _wkr.release_run_lock()
 
 
 def _ep_update(idx: int, **kw):
