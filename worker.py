@@ -65,6 +65,15 @@ def compress_episode_folder(ep_folder: str) -> Optional[str]:
             P.logger.warning(
                 '압축 거부 (서브디렉토리 존재 → 회차 폴더 아님): %s', ep_folder)
             return None
+    # 작품 폴더 신호(info.xml/cover.jpg/이미 압축된 .zip 회차)가 있으면 회차 폴더가
+    # 아니므로 거부 — cover.jpg(.jpg)를 이미지로 오인해 작품 폴더를 통째로 zip+rmtree
+    # 하던 사고 방지.
+    lower = {e.lower() for e in entries}
+    if 'info.xml' in lower or 'cover.jpg' in lower or any(e.endswith('.zip') for e in lower):
+        P.logger.warning(
+            '압축 거부 (작품 폴더 신호 info.xml/cover.jpg/zip 존재 → 회차 폴더 아님): %s',
+            ep_folder)
+        return None
 
     parent = os.path.dirname(ep_folder)
     name = os.path.basename(ep_folder)
@@ -723,7 +732,13 @@ class Worker:
         for root, dirs, files in os.walk(self.download_root):
             if dirs:
                 continue
-            if any(f.lower().endswith(_IMAGE_EXTS) for f in files):
+            lower = [f.lower() for f in files]
+            # 작품 폴더 신호(info.xml/cover.jpg/이미 압축된 .zip 회차)면 회차 폴더가
+            # 아니므로 제외 — cover.jpg 때문에 작품 폴더가 통째로 압축되던 버그 방지.
+            if ('info.xml' in lower or 'cover.jpg' in lower
+                    or any(f.endswith('.zip') for f in lower)):
+                continue
+            if any(f.endswith(_IMAGE_EXTS) for f in lower):
                 candidates.append(root)
 
         _auto_set(titles_total=len(candidates))
