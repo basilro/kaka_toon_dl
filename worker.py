@@ -37,6 +37,53 @@ def _episode_save_dir(download_root: str, notice_subdir: str,
     return os.path.join(download_root, c_folder, e_folder)
 
 
+def discover_title_folders(download_root: str,
+                           notice_subdir: str = '완결',
+                           logger=None) -> List[Tuple[str, str]]:
+    """download_root 아래 실제로 존재하는 작품 폴더를 수집.
+
+    - 최상위 디렉터리 = main 그룹 작품 폴더 (notice_subdir 폴더 자체는 제외)
+    - notice_subdir(완결) 폴더 안의 하위 디렉터리 = complete 그룹 작품 폴더
+    반환: [(group, folder_name), ...] (group ∈ 'main'|'complete'), 폴더명 정렬.
+
+    메타 동기화가 watchlist(설정 'titles') 비어 있어도 디스크에 이미 받아둔
+    작품을 대상으로 삼도록 하는 헬퍼.
+    """
+    found: List[Tuple[str, str]] = []
+    seen = set()
+    root = (download_root or '').strip()
+    if not root or not os.path.isdir(root):
+        return found
+    notice = _safe_filename(notice_subdir or '완결')
+
+    def _add(group: str, name: str) -> None:
+        key = (group, name)
+        if name and key not in seen:
+            seen.add(key)
+            found.append((group, name))
+
+    try:
+        for name in sorted(os.listdir(root)):
+            full = os.path.join(root, name)
+            if not os.path.isdir(full):
+                continue
+            if name == notice:
+                # 완결 그룹 — 한 단계 더 내려가 작품 폴더 수집
+                try:
+                    for sub in sorted(os.listdir(full)):
+                        if os.path.isdir(os.path.join(full, sub)):
+                            _add('complete', sub)
+                except OSError as e:
+                    if logger:
+                        logger.warning('[basic] 완결 폴더 스캔 실패: %s', e)
+                continue
+            _add('main', name)
+    except OSError as e:
+        if logger:
+            logger.warning('[basic] 다운로드 폴더 스캔 실패: %s', e)
+    return found
+
+
 _IMAGE_EXTS = ('.webp', '.jpg', '.jpeg', '.png', '.gif', '.bmp')
 
 
@@ -890,17 +937,51 @@ class Worker:
 
     # ---- 전 작품 메타 일괄 동기화 (UI 버튼) ----
     @_exclusive
-    def sync_metadata_all(self) -> dict:
-        """titles 리스트의 모든 작품에 대해 info.xml/cover.jpg 누락분 생성.
+    def _resolve_content_meta(self, raw: str, search_key: str):
+        """raw(URL 또는 제목) → (content_id, 표시제목, 메타dict).
 
-        다운로드 폴더에 작품 폴더가 이미 있는 항목만 처리 (없는 작품은
-        만들지 않고 스킵 — 다운로드 전에 굳이 빈 폴더 만들 필요 없음).
-        완결 그룹(notice_subdir 아래)도 동시에 점검.
+        URL 이면 content_id 직접 추출, 아니면 search_key 로 검색해 매칭.
+        실패 시 (None, None, None).
         """
-        P.logger.info('[basic] sync_metadata_all BEGIN items=%s', self.items)
+        cid = KakaotoonClient.extract_content_id(raw)
+        title_hint = None
+        if cid is None:
+            it = self.client.find_content(search_key)
+            if not it:
+                return None, None, None
+            cid = it.get('id')
+            title_hint = it.get('title') or search_key
+        if cid is None:
+            return None, None, None
+        cd = self.client.get_meta_for_info(
+            cid, title_hint=title_hint or search_key) or {}
+        if not cd:
+            return None, None, None
+        title = (cd.get('title') or title_hint or search_key or '').strip()
+        return cid, title, cd
+
+    def sync_metadata_all(self) -> dict:
+        """다운로드 폴더를 스캔해 모든 작품의 info.xml/cover.jpg 누락분 생성.
+
+        대상 = 설정 watchlist('titles') + download_path 를 스캔해 찾은 작품 폴더.
+        → watchlist 가 비어 있어도 이미 받아둔 작품이 있으면 메타를 채운다.
+        완결 그룹(notice_subdir 아래) 도 함께 스캔한다. 폴더가 이미 메타 완비면
+        네트워크 호출 없이 스킵.
+        """
+        # 대상 = watchlist(self.items) + 디스크에 실제 존재하는 작품 폴더.
+        disk = discover_title_folders(self.download_root, self.notice_subdir,
+                                      logger=P.logger)
+        watchlist = list(self.items)
+        # watchlist 토큰과 폴더명이 같으면 디스크 목록에서 제외 (중복 처리 방지)
+        wl_set = set(watchlist)
+        disk = [(g, f) for (g, f) in disk if f not in wl_set]
+        total = len(watchlist) + len(disk)
+
+        P.logger.info('[basic] sync_metadata_all BEGIN watchlist=%s disk=%d '
+                      'total=%d', watchlist, len(disk), total)
         _auto_reset()
         _auto_set(status='running', started_at=datetime.now().isoformat(),
-                  message='메타 동기화 시작', titles_total=len(self.items))
+                  message='메타 동기화 시작', titles_total=total)
         if not self.download_root:
             _auto_set(status='error', finished_at=datetime.now().isoformat(),
                       message='download_path 미설정')
@@ -909,9 +990,9 @@ class Worker:
             _auto_set(status='error', finished_at=datetime.now().isoformat(),
                       message='cookies_json 미설정')
             return {'ret': 'fail', 'reason': 'no_cookies'}
-        if not self.items:
+        if not total:
             _auto_set(status='error', finished_at=datetime.now().isoformat(),
-                      message='체크할 작품 미설정')
+                      message='동기화할 작품 없음 (watchlist 비어있고 다운로드 폴더에도 작품 폴더 없음)')
             return {'ret': 'fail', 'reason': 'no_titles'}
 
         try:
@@ -922,68 +1003,81 @@ class Worker:
                       message=f'쿠키 인증 실패: {e}')
             return {'ret': 'fail', 'reason': 'auth', 'msg': str(e)}
 
-        summary = {'titles': len(self.items), 'info': 0, 'cover': 0,
+        summary = {'titles': total, 'info': 0, 'cover': 0,
                    'skipped_no_folder': 0, 'failed': 0}
-        for raw in self.items:
+        done = 0
+
+        # 1) 설정 watchlist — 해석된 제목으로 main/complete 폴더 점검
+        for raw in watchlist:
             _auto_set(current_title=raw, current_phase='sync_metadata',
                       current_episode='', current_pages_done=0,
                       current_pages_total=0)
             try:
-                cid = KakaotoonClient.extract_content_id(raw)
+                cid, title, cd = self._resolve_content_meta(raw, raw)
                 if cid is None:
-                    it = self.client.find_content(raw)
-                    if not it:
-                        summary['failed'] += 1
-                        continue
-                    cid = it['id']
-                    title_guess = it.get('title') or raw
+                    P.logger.warning('[sync_metadata] 제목 매칭 실패: %r', raw)
+                    summary['failed'] += 1
                 else:
-                    title_guess = raw
-                _auto_set(current_title=title_guess)
-
-                # main / complete 두 위치 모두 점검 — 폴더가 있는 쪽에만 메타 채움
-                any_processed = False
-                cd_cache = None
-                for group, is_completed in (('main', None), ('complete', True)):
-                    folder = self._content_folder(title_guess, group)
-                    if not os.path.isdir(folder):
-                        continue
-                    any_processed = True
-                    if meta_mod.is_meta_complete(folder):
-                        continue
-                    if cd_cache is None:
-                        cd_cache = self.client.get_meta_for_info(
-                            cid, title_hint=title_guess) or {}
-                        # 메타에서 더 정확한 제목 발견 시 폴더 이름 재구성
-                        new_title = (cd_cache.get('title') or '').strip()
-                        if new_title and new_title != title_guess:
-                            alt_folder = self._content_folder(new_title, group)
-                            if os.path.isdir(alt_folder) and not os.path.isdir(folder):
-                                folder = alt_folder
-                            title_guess = new_title
-                            _auto_set(current_title=new_title)
-                    if not cd_cache:
-                        summary['failed'] += 1
-                        continue
-                    r = meta_mod.ensure_meta(
-                        folder, cd_cache,
-                        session=self.client.make_session(),
-                        logger=P.logger,
-                        is_completed=is_completed)
-                    if r.get('info'):
-                        summary['info'] += 1
-                    if r.get('cover'):
-                        summary['cover'] += 1
-                if not any_processed:
-                    summary['skipped_no_folder'] += 1
+                    _auto_set(current_title=title)
+                    any_processed = False
+                    for group, is_completed in (('main', None),
+                                                ('complete', True)):
+                        folder = self._content_folder(title, group)
+                        if not os.path.isdir(folder):
+                            continue
+                        any_processed = True
+                        if meta_mod.is_meta_complete(folder):
+                            continue
+                        r = meta_mod.ensure_meta(
+                            folder, cd, session=self.client.make_session(),
+                            logger=P.logger, is_completed=is_completed)
+                        if r.get('info'):
+                            summary['info'] += 1
+                        if r.get('cover'):
+                            summary['cover'] += 1
+                    if not any_processed:
+                        summary['skipped_no_folder'] += 1
             except Exception as e:
                 import traceback
                 P.logger.error('[sync_metadata] %r 예외: %s', raw, e)
                 P.logger.error(traceback.format_exc())
                 summary['failed'] += 1
-            _auto_set(titles_done=(summary['info'] + summary['cover']
-                                   + summary['skipped_no_folder']
-                                   + summary['failed']))
+            done += 1
+            _auto_set(titles_done=done)
+
+        # 2) 디스크에서 찾은 작품 폴더 — 발견한 실제 폴더에 그대로 기록
+        for group, folder_name in disk:
+            is_completed = True if group == 'complete' else None
+            _auto_set(current_title=folder_name, current_phase='sync_metadata',
+                      current_episode='', current_pages_done=0,
+                      current_pages_total=0)
+            try:
+                folder = self._content_folder(folder_name, group)
+                if meta_mod.is_meta_complete(folder):
+                    pass  # 이미 완비 — 네트워크 호출 없이 스킵
+                else:
+                    cid, title, cd = self._resolve_content_meta(folder_name,
+                                                                folder_name)
+                    if cid is None:
+                        P.logger.warning('[sync_metadata] 제목 매칭 실패: %r',
+                                         folder_name)
+                        summary['failed'] += 1
+                    else:
+                        _auto_set(current_title=title)
+                        r = meta_mod.ensure_meta(
+                            folder, cd, session=self.client.make_session(),
+                            logger=P.logger, is_completed=is_completed)
+                        if r.get('info'):
+                            summary['info'] += 1
+                        if r.get('cover'):
+                            summary['cover'] += 1
+            except Exception as e:
+                import traceback
+                P.logger.error('[sync_metadata] %r 예외: %s', folder_name, e)
+                P.logger.error(traceback.format_exc())
+                summary['failed'] += 1
+            done += 1
+            _auto_set(titles_done=done)
 
         _auto_set(status='done', finished_at=datetime.now().isoformat(),
                   current_title='', current_phase='', current_episode='',
@@ -991,6 +1085,7 @@ class Worker:
                            f"cover {summary['cover']}, "
                            f"폴더없음 {summary['skipped_no_folder']}, "
                            f"실패 {summary['failed']}"))
+        P.logger.info('[basic] sync_metadata_all END %s', summary)
         return {'ret': 'success', **summary}
 
     # ---- info.xml / cover.jpg ----
