@@ -136,7 +136,7 @@ def analyze(url_or_id: str) -> Dict[str, Any]:
             'availability': avail,
             'completed': completed,
             'selectable': (avail in ('free', 'unlocked')) and not completed,
-            'state': 'pending',
+            'state': 'have' if completed else 'pending',  # have=이미받음(이력에 completed)
             'pages_done': 0,
             'pages_total': 0,
             'save_dir': '',
