@@ -40,18 +40,49 @@ def _episode_save_dir(download_root: str, notice_subdir: str,
 _IMAGE_EXTS = ('.webp', '.jpg', '.jpeg', '.png', '.gif', '.bmp')
 
 
-def compress_episode_folder(ep_folder: str) -> Optional[str]:
-    """회차 폴더 → 같은 위치에 .zip 생성. 성공 시 원본 폴더 삭제. 멱등.
+def _verify_episode_zip(ep_folder: str, zip_path: str) -> bool:
+    """zip 이 원본 회차 폴더의 모든 이미지를 동일 이름·크기로 담고 CRC 무결한지 검증.
 
-    이미 .zip 이 있으면 그대로 둠 (덮어쓰지 않음). 이미지 파일만 포함 —
-    .webp.cef 원본 / _keys.json 같은 디버그 파일은 제외.
-
-    반환: 생성/기존 zip 경로 또는 None (실패).
-
-    안전장치: 폴더 안에 서브디렉토리가 있으면 회차 폴더가 아닌 작품/그룹 폴더로
-    판단하여 압축 거부 (실수로 작품 전체를 날리는 사고 방지).
+    삭제 전에 호출해 '압축이 문제없을 때만' 원본을 지우도록 하는 안전장치.
     """
-    import shutil
+    import zipfile
+    if not os.path.isfile(zip_path) or not os.path.isdir(ep_folder):
+        return False
+    try:
+        src = {}
+        for f in os.listdir(ep_folder):
+            p = os.path.join(ep_folder, f)
+            if os.path.isfile(p) and f.lower().endswith(_IMAGE_EXTS):
+                src[f] = os.path.getsize(p)
+    except Exception:
+        return False
+    if not src:
+        return False
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            if zf.testzip() is not None:   # 멤버 CRC 손상
+                return False
+            infos = {i.filename: i.file_size for i in zf.infolist()}
+    except Exception:
+        return False
+    # 원본 이미지가 모두 같은 이름·크기로 zip 안에 있어야 통과.
+    for fn, size in src.items():
+        if infos.get(fn) != size:
+            return False
+    return True
+
+
+def _zip_episode_folder(ep_folder: str) -> Optional[str]:
+    """회차 폴더 → 같은 위치에 .zip 생성. 원본은 삭제하지 않는다 (삭제는 검증 후).
+
+    이미지 파일만 포함 — .webp.cef 원본 / _keys.json 같은 디버그 파일은 제외.
+    기존 zip 이 원본과 일치하면 그대로 두고, 손상/불일치면 재생성. 멱등.
+
+    반환: zip 경로 또는 None (대상 아님/실패).
+
+    안전장치: 폴더 안에 서브디렉토리가 있거나 작품 폴더 신호(info.xml/cover.jpg/
+    .zip)가 있으면 회차 폴더가 아니므로 압축 거부.
+    """
     import zipfile
     if not os.path.isdir(ep_folder):
         return None
@@ -79,12 +110,14 @@ def compress_episode_folder(ep_folder: str) -> Optional[str]:
     name = os.path.basename(ep_folder)
     zip_path = os.path.join(parent, name + '.zip')
     if os.path.exists(zip_path):
-        # 이미 압축됨 — 원본 폴더 남아있으면 삭제만
+        # 기존 zip 이 원본과 일치하면 재사용, 손상/불일치면 지우고 재생성.
+        if _verify_episode_zip(ep_folder, zip_path):
+            return zip_path
         try:
-            shutil.rmtree(ep_folder)
-        except Exception:
-            pass
-        return zip_path
+            os.remove(zip_path)
+        except Exception as e:
+            P.logger.warning('기존 손상 zip 삭제 실패 — 건너뜀 %s: %s', zip_path, e)
+            return None
 
     files_to_zip = []
     for f in sorted(entries):
@@ -108,7 +141,24 @@ def compress_episode_folder(ep_folder: str) -> Optional[str]:
                 pass
         P.logger.warning('압축 실패 %s: %s', ep_folder, e)
         return None
+    return zip_path
 
+
+def compress_episode_folder(ep_folder: str) -> Optional[str]:
+    """회차 폴더 → zip 생성 → 검증 통과 시에만 원본 삭제. 멱등.
+
+    단건/인라인 다운로드용 편의 함수. 일괄 압축(compress_all)은 생성·검증·삭제를
+    단계별로 분리해 직접 수행한다.
+
+    반환: 검증까지 통과한 zip 경로, 또는 None (대상 아님/실패/검증 실패 — 원본 보존).
+    """
+    import shutil
+    zip_path = _zip_episode_folder(ep_folder)
+    if not zip_path:
+        return None
+    if not _verify_episode_zip(ep_folder, zip_path):
+        P.logger.warning('압축 검증 실패 — 원본 보존: %s', ep_folder)
+        return None
     try:
         shutil.rmtree(ep_folder)
     except Exception as e:
@@ -711,9 +761,12 @@ class Worker:
     def compress_all(self) -> dict:
         """download_path 아래의 모든 회차 폴더를 ZIP 으로 압축.
 
-        '회차 폴더' = 이미지 파일을 가진 폴더. info.xml/cover.jpg 만 있는
-        작품 폴더는 자동으로 건너뜀 (이미지 없음).
-        이미 .zip 으로 압축된 회차는 건너뜀 (멱등).
+        '회차 폴더' = 이미지 파일을 가진 leaf 폴더. 작품 폴더(info.xml/cover.jpg/
+        .zip 보유)는 자동 제외. 이미 .zip 인 회차는 건너뜀 (멱등).
+
+        2단계로 동작: (1) 후보를 모두 압축(zip 생성, 원본 유지) →
+        (2) 각 zip 을 원본과 대조 검증 → 통과한 것만 원본 폴더 삭제.
+        검증 실패 시 원본을 보존해 압축 사고로 인한 데이터 손실을 막는다.
         """
         P.logger.info('[basic] compress_all BEGIN root=%s', self.download_root)
         _auto_reset()
@@ -741,7 +794,9 @@ class Worker:
             if any(f.endswith(_IMAGE_EXTS) for f in lower):
                 candidates.append(root)
 
+        # Phase 1: 압축 — zip 만 생성하고 원본 폴더는 남겨둔다 (삭제는 검증 후).
         _auto_set(titles_total=len(candidates))
+        zipped: List[tuple] = []   # (회차폴더, zip경로)
         compressed = 0
         skipped = 0
         failed = 0
@@ -750,8 +805,9 @@ class Worker:
             _auto_set(current_title=rel, current_phase='compressing',
                       titles_done=idx - 1)
             try:
-                zip_path = compress_episode_folder(ep)
+                zip_path = _zip_episode_folder(ep)
                 if zip_path:
+                    zipped.append((ep, zip_path))
                     compressed += 1
                 else:
                     skipped += 1
@@ -760,13 +816,39 @@ class Worker:
                 failed += 1
             _auto_set(titles_done=idx)
 
+        # Phase 2: 검증 후 원본 삭제 — 검증 통과한 회차만 폴더를 지운다.
+        # 검증 실패 시 원본을 보존하고 손상된 zip 을 제거한다 (데이터 손실 방지).
+        import shutil
+        verified = 0
+        verify_failed = 0
+        for ep, zip_path in zipped:
+            rel = os.path.relpath(ep, self.download_root)
+            _auto_set(current_title=rel, current_phase='verifying')
+            if _verify_episode_zip(ep, zip_path):
+                try:
+                    shutil.rmtree(ep)
+                    verified += 1
+                except Exception as e:
+                    P.logger.warning('검증 후 폴더 삭제 실패 %s: %s', ep, e)
+                    verify_failed += 1
+            else:
+                P.logger.warning('압축 검증 실패 — 원본 보존, 손상 zip 제거: %s', ep)
+                try:
+                    os.remove(zip_path)
+                except Exception:
+                    pass
+                verify_failed += 1
+
         _auto_set(status='done', finished_at=datetime.now().isoformat(),
                   current_title='', current_phase='',
-                  message=(f'압축 완료 — 처리 {compressed}개, '
+                  message=(f'압축 완료 — 생성 {compressed}개, 검증·삭제 {verified}개, '
+                           f'검증실패(원본보존) {verify_failed}개, '
                            f'스킵 {skipped}개, 실패 {failed}개'))
-        P.logger.info('[basic] compress_all END processed=%d skipped=%d failed=%d',
-                      compressed, skipped, failed)
+        P.logger.info('[basic] compress_all END created=%d verified=%d '
+                      'verify_failed=%d skipped=%d failed=%d',
+                      compressed, verified, verify_failed, skipped, failed)
         return {'ret': 'success', 'processed': compressed,
+                'verified': verified, 'verify_failed': verify_failed,
                 'skipped': skipped, 'failed': failed}
 
     # ---- 기존 _keys.json 일괄 삭제 (UI 버튼) ----
