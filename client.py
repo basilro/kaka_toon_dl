@@ -357,9 +357,9 @@ class KakaotoonClient:
             hit = self._pick_match(title, items)
             if hit:
                 return hit
-            # 원제목으로 검색했는데 매칭 실패 → 첫 결과 폴백(기존 동작 유지)
-            if kw == title:
-                return items[0]
+            # 1순위 폴백 제거 — 검색은 키워드와 무관한 인기작도 함께 돌려주므로
+            # (카카오 미연재작 등) 엉뚱한 작품을 받게 됨. _pick_match 가 정확/
+            # 정규화/부분포함까지 보므로, 못 찾으면 None 으로 깔끔하게 실패.
         return None
 
     def get_content(self, content_id: int) -> Dict:
