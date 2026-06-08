@@ -120,6 +120,8 @@ class ModuleBasic(PluginModuleBase):
                 ret = self.do_action_cleanup_keys_json()
             elif command == 'compress_all':
                 ret = self.do_action_compress_all()
+            elif command == 'pagecount_all':
+                ret = self.do_action_pagecount_all()
             elif command == 'manalyze':
                 from . import manual_worker
                 url = (arg1 or '').strip()
@@ -252,6 +254,25 @@ class ModuleBasic(PluginModuleBase):
         threading.Thread(target=_bg, daemon=True).start()
         return {'ret': 'success',
                 'msg': '압축 시작됨 — "진행 상황" 메뉴에서 확인'}
+
+    def do_action_pagecount_all(self):
+        """기존 압축 파일에 #페이지수 일괄 부여 (파일명만 변경, 백그라운드)."""
+        import threading
+        from . import worker as auto_worker
+        if auto_worker.get_auto_state().get('status') == 'running':
+            return {'ret': 'fail', 'msg': '이미 다른 작업 실행 중'}
+
+        def _bg():
+            try:
+                with F.app.app_context():
+                    Worker().add_pagecount_all()
+            except Exception as e:
+                P.logger.error('[basic] add_pagecount_all Exception: %s', e)
+                P.logger.error(traceback.format_exc())
+
+        threading.Thread(target=_bg, daemon=True).start()
+        return {'ret': 'success',
+                'msg': '페이지수 부여 시작됨 — "진행 상황" 메뉴에서 확인'}
 
     def do_action_cleanup_keys_json(self):
         """download_path 아래의 _keys.json 일괄 삭제 (과거 버그 잔재 청소)."""
