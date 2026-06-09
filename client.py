@@ -21,6 +21,46 @@ from typing import Optional, List, Dict, Any, Tuple
 
 import requests
 
+# ── TLS 지문(JA3/JA4) 둔갑 ────────────────────────────────────────
+# curl_cffi 가 설치돼 있으면 실제 Chrome 의 TLS ClientHello·HTTP/2 지문을
+# 그대로 흉내내 JA3/JA4 기반 봇 차단을 회피한다. 미설치·미지원 플랫폼에서는
+# 자동으로 평범한 requests 세션으로 폴백하므로 동작은 항상 보장된다.
+try:
+    from curl_cffi import requests as _cffi
+    _CFFI_OK = True
+except Exception:
+    _cffi = None
+    _CFFI_OK = False
+
+# 'chrome' = 설치된 curl_cffi 가 지원하는 최신 Chrome 지문(별칭).
+_IMPERSONATE = 'chrome'
+
+# 프록시/연결 오류를 백엔드(requests·curl_cffi) 무관하게 잡기 위한 예외 튜플.
+_PROXY_ERRORS = (requests.exceptions.ProxyError,)
+_CONN_ERRORS = (requests.exceptions.ConnectionError,)
+if _CFFI_OK:
+    try:
+        from curl_cffi.requests.exceptions import (
+            ProxyError as _CffiProxyError,
+            ConnectionError as _CffiConnError,
+        )
+        _PROXY_ERRORS = _PROXY_ERRORS + (_CffiProxyError,)
+        _CONN_ERRORS = _CONN_ERRORS + (_CffiConnError,)
+    except Exception:
+        pass
+
+
+def _new_session():
+    """TLS 지문 둔갑 세션. curl_cffi 가 있으면 Chrome 으로 impersonate,
+    없거나 생성 실패 시 평범한 requests.Session 으로 폴백."""
+    if _CFFI_OK:
+        try:
+            return _cffi.Session(impersonate=_IMPERSONATE)
+        except Exception:
+            pass
+    return requests.Session()
+
+
 try:
     from Crypto.Cipher import AES
 except Exception:  # 첫 로드 시점에 자동설치되지만 fallback
@@ -109,7 +149,7 @@ class KakaotoonClient:
         return f'KP.{rand}.{_now_ms()}'
 
     def _session(self) -> requests.Session:
-        s = requests.Session()
+        s = _new_session()
         s.headers.update({
             'User-Agent': DEFAULT_UA,
             'Accept': 'application/json, text/plain, */*',
