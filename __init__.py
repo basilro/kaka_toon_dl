@@ -20,3 +20,8 @@ try:
     from PIL import Image  # noqa  (Pillow)
 except Exception:
     os.system("pip install Pillow")
+
+try:
+    import nacl  # noqa
+except Exception:
+    os.system("pip install pynacl")
