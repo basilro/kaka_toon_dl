@@ -51,3 +51,4 @@ client.py
 worker.py
 manual_worker.py
 meta.py
+mod_basic.py
