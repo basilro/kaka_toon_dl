@@ -77,6 +77,8 @@
                   '예) {다운로드경로}/완결/{작품}/{NNNN_회차}/',
                   '※ 작품별 유료화 일자가 지났으면 자동으로 스킵 — 별도 개월 수 설정 불필요']) }}
 
+        {{ macros.setting_buttons([['noticeImmediatelyExecuteBtn', '공지 즉시 실행']], '공지 실행') }}
+
         <hr style="margin:18px 0;"/>
         <h5 style="margin-bottom:8px;">프록시 (선택)</h5>
 
@@ -238,5 +240,21 @@ function _notifyTest(kind){
 }
 $('body').on('click', '#notifyTestCookieBtn',  function(e){ e.preventDefault(); _notifyTest('cookie'); });
 $('body').on('click', '#notifyTestDownloadBtn',function(e){ e.preventDefault(); _notifyTest('download'); });
+
+$('body').on('click', '#noticeImmediatelyExecuteBtn', function(e){
+  e.preventDefault();
+  if (!confirm('카카오웹툰 공지에서 유료화/종료 예정 작품을 추출하여 즉시 다운로드를 시작합니다.\n진행 상황은 "진행 상황" 메뉴에서 확인하세요.\n계속하시겠습니까?')) return;
+  $.post('/' + package_name + '/ajax/basic/command',
+         {command: 'notice_immediately_execute'},
+         function(data){
+    if(data && data.ret === 'success'){
+      $.notify(data.msg || '공지 다운로드 시작됨', {className: 'success'});
+    } else {
+      $.notify((data && data.msg) || '실행 실패', {className: 'error'});
+    }
+  }).fail(function(xhr){
+    $.notify('서버 호출 실패: ' + xhr.status, {className: 'error'});
+  });
+});
 </script>
 {% endblock %}
