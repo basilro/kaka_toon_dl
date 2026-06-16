@@ -1,6 +1,6 @@
-title: "kaka_toon_dl"
-version: "1.0.55"
-package_name: "kaka_toon_dl"
-developer: "basilro"
-description: "카카오웹툰 기다무 자동 다운로드"
-home: "https://github.com/basilro/kaka_toon_dl"
+description: 카카오웹툰 기다무 자동 다운로드
+developer: basilro
+home: https://github.com/basilro/kaka_toon_dl
+package_name: kaka_toon_dl
+title: kaka_toon_dl
+version: 1.0.56
