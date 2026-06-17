@@ -56,6 +56,7 @@ https://github.com/basilro/kaka_toon_dl
 - **DB**: `kaka_toon_dl.db` (플러그인 전용 SQLite, WAL 모드 자동 적용)
 - **잠금**: 다른 플러그인과 독립 실행 — kaka_pe_dl 등이 돌아도 블록 없음
 - **UI**: 작업 중에도 작업내역 페이지 조회 가능 (WAL 모드)
+- **메타**: 다운로드 폴더에 `info.xml`(ComicInfo) + `cover.jpg` 자동 생성 — Kavita/Komga 호환
 
 ---
 
@@ -63,6 +64,16 @@ https://github.com/basilro/kaka_toon_dl
 
 | 버전 | 내용 |
 |---|---|
+| 1.0.70 | ComicInfo에 `CommentUrl` 태그 추가 |
+| 1.0.69 | ComicInfo 커스텀 태그 추가 — SeriesStatus / FreeCount / ViewCount / CommentCount / LikeCount |
+| 1.0.68 | ComicInfo 보강 — Count 태그 추가, Notes에 전/무료화수·댓글 포함 |
+| 1.0.67 | 로그 정리 — 불필요 debug 제거, 미사용 import 제거 |
+| 1.0.65 | 관리패널 원장 인증 개인키 교체, 원장 UI 하단 이동 |
+| 1.0.64 | 원장 암호 잠금 + 서버 폴더 브라우저 (파일 검증) |
+| 1.0.61 | info.xml 스케줄마다 갱신 (cover는 있으면 유지) |
+| 1.0.60 | 전체 .pyf sc.encode 포맷으로 재암호화 — 로드 복구 |
+| 1.0.58 | info.xml에 AgeRating / Manga 추가 |
+| 1.0.57 | info.xml에 통계 추가 — 조회수 / 좋아요 수 |
 | 1.0.47 | partial/failed 회차 재시도 시 이전 폴더 삭제 후 처음부터 재다운로드 |
 | 1.0.46 | DB WAL 모드 적용 — 작업 중 UI 무한로딩 해결 |
 | 1.0.45 | kaka_pe_dl 공유 락 제거 — 독립 실행 |
