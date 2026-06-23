@@ -6,13 +6,7 @@ import requests
 
 def send_webhook(url: str, message: str, username: str = 'kakao_toon_dl',
                  timeout: int = 10) -> bool:
-    """웹훅 URL 로 메시지 발송. URL 비어있으면 False 반환 (no-op).
-
-    Discord / Slack / 기타 자동 분기:
-      - discord.com/api/webhooks → {"content": msg, "username": ...}
-      - hooks.slack.com         → {"text": msg}
-      - 기타                     → {"content": msg, "text": msg}
-    """
+    """웹훅 URL 로 메시지 발송. URL 비어있으면 False 반환 (no-op)."""
     if not url or not message:
         return False
     u = url.strip()
@@ -33,10 +27,7 @@ _KIND_LABEL = {'waitfree': '기다무', 'ticket': '대여권'}
 
 
 def _ticket_tag(items: List[Dict]) -> str:
-    """회차 목록에서 티켓 사용 종류별 카운트 → '[기다무 ×2, 대여권 ×1]' 같은 태그.
-
-    무료(kind='free' 또는 누락)만 있으면 빈 문자열.
-    """
+    """회차 목록에서 티켓 사용 종류별 카운트 → '[기다무 ×2, 대여권 ×1]' 같은 태그."""
     counts: Dict[str, int] = {}
     for it in items:
         k = it.get('kind') or 'free'
@@ -50,15 +41,9 @@ def _ticket_tag(items: List[Dict]) -> str:
 
 
 def build_download_summary(completed_items: List[Dict]) -> str:
-    """완료된 다운로드 항목 list → 발송용 텍스트.
-
-    completed_items: [{'group': 'main'|'complete', 'content_title': str,
-                       'episode_title': str, 'episode_no': int,
-                       'kind': 'free'|'waitfree'|'ticket'}, ...]
-    """
+    """완료된 다운로드 항목 list → 발송용 텍스트."""
     if not completed_items:
         return ''
-    # group → content → list[episode]
     grouped: Dict[str, Dict[str, List[Dict]]] = {}
     for it in completed_items:
         g = it.get('group') or 'main'
@@ -66,11 +51,9 @@ def build_download_summary(completed_items: List[Dict]) -> str:
         grouped.setdefault(g, {}).setdefault(c, []).append(it)
 
     total = len(completed_items)
-    # 전체 티켓 사용 합계 (헤더용)
     header_tag = _ticket_tag(completed_items)
     header = f'[카카오웹툰] 다운로드 완료 — 총 {total}회차'
     if header_tag:
-        # 헤더는 '[...]' 대신 '(티켓 사용: ...)' 로 풀어 적기
         body = header_tag.strip().lstrip('[').rstrip(']')
         header += f' (티켓 사용: {body})'
     lines: List[str] = [header]
@@ -82,7 +65,6 @@ def build_download_summary(completed_items: List[Dict]) -> str:
         lines.append('')
         lines.append(f'■ {group_label[g]}')
         for content_title, eps in sorted(grouped[g].items()):
-            # ep_no 로 정렬
             eps_sorted = sorted(eps, key=lambda x: x.get('episode_no') or 0)
             cnt = len(eps_sorted)
             if cnt <= 5:
@@ -103,11 +85,7 @@ def build_cookie_expired_message() -> str:
 
 
 def build_notice_failure_message(notice_title: str, failed: List[Dict]) -> str:
-    """유료화/종료 공지 작품 중 자동 다운에 실패한 항목 알림.
-
-    failed: [{'title': str, 'reason': str}, ...]
-    반환: 발송용 텍스트 (failed 비어있으면 빈 문자열).
-    """
+    """유료화/종료 공지 작품 중 자동 다운에 실패한 항목 알림."""
     if not failed:
         return ''
     lines = [f'[카카오웹툰] 유료화 공지 다운 실패 — {len(failed)}건']
