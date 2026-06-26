@@ -66,7 +66,10 @@
 var package_name = "{{ arg['package_name'] }}";
 var ALL = [];            // 전체 목록
 var REG = {};            // 등록된 contentId set
+var REGNAME = {};        // 등록된 제목(정규화) set
 var curDay = 'all';
+
+function norm(s){ return (s || '').replace(/\s+/g, '').toLowerCase(); }
 
 function dayBadges(days){
   return (days || []).map(function(d){
@@ -75,7 +78,7 @@ function dayBadges(days){
 }
 
 function cardHtml(it){
-  var reg = !!REG[it.contentId];
+  var reg = !!REG[it.contentId] || !!REGNAME[norm(it.titleName)];
   var cls = 'b-card' + (reg ? ' b-registered' : '');
   var tags = '';
   if (it['new'])   tags += '<span class="badge badge-success">신작</span>';
@@ -98,7 +101,7 @@ function cardHtml(it){
 
 function visible(it){
   if (curDay !== 'all' && (it.days || []).indexOf(curDay) < 0) return false;
-  if ($('#b_hide_registered').is(':checked') && REG[it.contentId]) return false;
+  if ($('#b_hide_registered').is(':checked') && (REG[it.contentId] || REGNAME[norm(it.titleName)])) return false;
   var q = ($('#b_search').val() || '').trim().toLowerCase();
   if (q){
     var hay = ((it.titleName || '') + ' ' + (it.author || '')).toLowerCase();
@@ -113,7 +116,7 @@ function render(){
   for (var i = 0; i < list.length; i++) html += cardHtml(list[i]);
   $('#b_grid').html(html || '<div style="padding:20px; color:#999;">표시할 작품이 없습니다.</div>');
   $('#b_total').text(ALL.length);
-  $('#b_reg_count').text(Object.keys(REG).length);
+  $('#b_reg_count').text(ALL.filter(function(it){ return REG[it.contentId] || REGNAME[norm(it.titleName)]; }).length);
   updateSel();
 }
 
@@ -135,8 +138,9 @@ function loadList(){
   $.post('/' + package_name + '/ajax/basic/command', {command: 'browse_weekday'}, function(data){
     if (data && data.ret === 'success'){
       ALL = data.items || [];
-      REG = {};
+      REG = {}; REGNAME = {};
       (data.registered || []).forEach(function(t){ REG[t] = true; });
+      (data.registered_names || []).forEach(function(t){ REGNAME[t] = true; });
       $('#b_status').text('갱신됨 (' + ALL.length + '편)');
       render();
     } else {
@@ -173,18 +177,23 @@ $('body').on('change', '#b_check_all', function(){
 
 $('body').on('click', '#b_add', function(e){
   e.preventDefault();
-  var ids = $('.b-check:checked:not(:disabled)').map(function(){
-    return $(this).data('id');
-  }).get();
+  var ids = [], titles = [];
+  $('.b-check:checked:not(:disabled)').each(function(){
+    var id = $(this).data('id');
+    ids.push(id);
+    var it = ALL.filter(function(x){ return String(x.contentId) === String(id); })[0];
+    titles.push(it ? (it.titleName || '') : '');
+  });
   if (ids.length === 0){ $.notify('등록할 작품을 선택하세요', {className: 'warn'}); return; }
   if (!confirm(ids.length + '편을 스케줄(다운로드 목록)에 등록할까요?')) return;
   $('#b_add').prop('disabled', true);
   $.post('/' + package_name + '/ajax/basic/command',
-         {command: 'schedule_add', arg1: ids.join(',')}, function(data){
+         {command: 'schedule_add', arg1: ids.join(','), arg2: titles.join('\n')}, function(data){
     if (data && data.ret === 'success'){
       $.notify(data.msg || '등록됨', {className: 'success'});
-      REG = {};
+      REG = {}; REGNAME = {};
       (data.registered || []).forEach(function(t){ REG[t] = true; });
+      (data.registered_names || []).forEach(function(t){ REGNAME[t] = true; });
       render();
     } else {
       $.notify((data && data.msg) || '등록 실패', {className: 'error'});
