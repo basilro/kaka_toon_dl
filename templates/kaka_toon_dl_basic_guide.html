@@ -49,6 +49,8 @@
         <td>Discord/Slack 웹훅. 쿠키 만료 · 다운로드 완료 알림을 각각 켜고 끔.</td></tr>
     <tr><td>설정 &gt; 자동</td>
         <td>스케줄러. Interval(분) 또는 Cron 형식. SJVA 시작 시 자동 실행도 옵션.</td></tr>
+    <tr><td>연재 목록</td>
+        <td>카카오웹툰 연재작을 요일별로 조회 · 선택해서 <em>체크할 웹툰(스케줄)</em>에 바로 등록. 이미 등록된 작품은 표시됨.</td></tr>
     <tr><td>수동 다운로드</td>
         <td>작품/회차 URL(또는 contentId)을 분석해 회차를 선택해서 즉석 다운. 이미 받은 회차는 비활성.</td></tr>
     <tr><td>진행 상황</td>
@@ -86,6 +88,7 @@
     <li><strong>이미지 저장 형식</strong>: <code>webp</code>(기본, 가장 빠름) / <code>jpg</code>(흰 배경 합성, 품질 92) / <code>png</code>(무손실). jpg·png 는 변환에 CPU·시간이 약간 듭니다.</li>
     <li><strong>공지 기반 자동 다운</strong>을 켜면 카카오웹툰의 유료화/종료 공지에서 작품을 추출해 무료/보유 회차를 미리 받아둡니다(전환일이 지나면 자동 스킵).</li>
     <li><strong>회차 ZIP 압축</strong>: On이면 정상 완료된 회차만 zip으로 묶고 원본 폴더 삭제. 부분 실패 회차는 그대로 폴더 유지.</li>
+    <li><strong>작품당 신규 다운 상한</strong>: 한 번 실행에 작품당 최대 <strong>10회차</strong>까지만 새로 받습니다(무료 · 기다무 · 유료 회차 합산). 나머지는 다음 실행에서 이어서 받습니다.</li>
     <li><strong>쿠키 만료</strong>: 필수 쿠키는 <code>_kau</code>. 만료 감지 시 웹훅으로 1회 알림. 재로그인 → Cookie-Editor 재-export → 붙여넣기.</li>
   </ul>
 
