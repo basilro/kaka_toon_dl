@@ -98,7 +98,16 @@
                   '※ On일 때 API 호출 + 이미지 CDN + cover 다운로드 모두 같은 프록시 사용 (토큰 IP 검증 회피).',
                   '※ 트래픽 부담 ↑ — 불안정하면 Off']) }}
 
-        {{ macros.setting_buttons([['globalDbDeleteBtn', '이력 초기화']], 'DB 정리') }}
+        {{ macros.setting_buttons([['globalDbDeleteBtn', '이력 초기화'],
+                                   ['dbCompactInfoBtn', 'DB 용량 확인'],
+                                   ['dbCompactRunBtn', 'DB 정리']], 'DB 정리') }}
+        <div style="padding:0 0 14px; color:#666; font-size:0.9em;">
+          <strong>DB 용량 확인</strong> — 현재 DB 파일 크기를 보여줍니다.<br/>
+          <strong>DB 정리</strong> — 쌓인 불필요한 내부 데이터를 지우고 DB 파일을
+          압축해 용량을 줄입니다. 다운로드 이력·설정은 그대로 유지됩니다.<br/>
+          ※ DB가 커지면 이력 조회가 느려집니다. 느려졌다고 느껴지면 정리해 주세요.<br/>
+          ※ 파일이 크면 몇 분 걸릴 수 있고, 그동안 다운로드는 멈춰두는 편이 좋습니다.
+        </div>
       {{ macros.m_tab_content_end() }}
 
       {{ macros.m_tab_content_start('notify', false) }}
@@ -254,6 +263,38 @@ $('body').on('click', '#noticeImmediatelyExecuteBtn', function(e){
          function(data){
     if(data && data.ret === 'success'){
       $.notify(data.msg || '공지 다운로드 시작됨', {className: 'success'});
+    } else {
+      $.notify((data && data.msg) || '실행 실패', {className: 'error'});
+    }
+  }).fail(function(xhr){
+    $.notify('서버 호출 실패: ' + xhr.status, {className: 'error'});
+  });
+});
+
+/* ===== DB 정리 ===== */
+$('body').on('click', '#dbCompactInfoBtn', function(e){
+  e.preventDefault();
+  $.post('/' + package_name + '/ajax/basic/command',
+         {command: 'db_compact', arg1: 'info'},
+         function(data){
+    if(data && data.ret === 'success'){
+      $.notify(data.msg || '조회됨', {className: 'info', autoHideDelay: 8000});
+    } else {
+      $.notify((data && data.msg) || '조회 실패', {className: 'error'});
+    }
+  }).fail(function(xhr){
+    $.notify('서버 호출 실패: ' + xhr.status, {className: 'error'});
+  });
+});
+
+$('body').on('click', '#dbCompactRunBtn', function(e){
+  e.preventDefault();
+  if (!confirm('쌓인 불필요한 내부 데이터를 지우고 DB 파일을 압축해 용량을 줄입니다.\n\n· 다운로드 이력과 설정은 그대로 유지됩니다.\n· 파일이 크면 몇 분 걸리고, 그동안 DB 쓰기가 잠깁니다.\n  다운로드는 멈춰두는 것을 권장합니다.\n\n계속하시겠습니까?')) return;
+  $.post('/' + package_name + '/ajax/basic/command',
+         {command: 'db_compact', arg1: 'run'},
+         function(data){
+    if(data && data.ret === 'success'){
+      $.notify(data.msg || 'DB 정리 시작됨', {className: 'success', autoHideDelay: 10000});
     } else {
       $.notify((data && data.msg) || '실행 실패', {className: 'error'});
     }
