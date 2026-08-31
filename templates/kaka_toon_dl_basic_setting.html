@@ -38,8 +38,47 @@
         {{ macros.setting_input_text_and_buttons('download_path', '다운로드 경로',
             [['select_download_path_btn', '경로 선택']],
             value=arg['download_path'],
-            desc=['{다운로드경로}/{작품제목}/{NNNN_회차제목}/{001.<ext> ...} 형태로 저장됨',
+            desc=['{다운로드경로}/{작품폴더}/{회차폴더}/{001.<ext> ...} 형태로 저장됨',
+                  '작품·회차 폴더 이름은 아래 형식 설정으로 바꿀 수 있음 (기본: 작품제목 / NNNN_회차제목)',
                   '※ AES-CBC 복호화 실패 시에만 원본 .webp.cef + _keys.json 저장 (정상 회차에는 미생성)']) }}
+
+        {{ macros.setting_input_text('format_title', '작품 폴더명 형식',
+            value=arg['format_title'],
+            desc=['중괄호로 감싼 말만 값으로 바뀌고, 나머지 글자는 적은 그대로 쓰입니다.',
+                  '쓸 수 있는 말: {title} = 작품명, {author} = 작가명, {title_id} = 작품 번호',
+                  '비우면 {title} 로 동작합니다.']) }}
+
+        {{ macros.setting_input_text('format_episode', '회차 폴더명 형식',
+            value=arg['format_episode'],
+            desc=['쓸 수 있는 말: {no} = 회차 번호, {subtitle} = 회차명, {title} = 작품명, {author} = 작가명, {title_id} = 작품 번호',
+                  '비우면 {no}_{subtitle} 로 동작합니다.']) }}
+
+        {{ macros.setting_input_text('no_digits', '회차 번호 자릿수',
+            value=arg['no_digits'], col='2',
+            desc=['{no} 를 몇 자리로 채울지. 4면 0003, 2면 03, 0이면 3.']) }}
+
+        <div class="form-group" style="margin-bottom:16px;">
+          <div class="col-sm-2 control-label"></div>
+          <div class="col-sm-10">
+            <div style="margin-bottom:6px;">
+              <span style="color:#888; font-size:0.9em;">예시(누르면 채워집니다):</span>
+              <button class="btn btn-sm btn-outline-secondary fmt-preset"
+                      data-t="{title}" data-e="{no}_{subtitle}">0003_3화 - 시작</button>
+              <button class="btn btn-sm btn-outline-secondary fmt-preset"
+                      data-t="{title}" data-e="[{no}] {subtitle}">[0003] 3화 - 시작</button>
+              <button class="btn btn-sm btn-outline-secondary fmt-preset"
+                      data-t="{title}" data-e="{no}">0003</button>
+              <button class="btn btn-sm btn-outline-secondary fmt-preset"
+                      data-t="{title} ({author})" data-e="{no}_{subtitle}">작품명 뒤에 작가</button>
+              <button class="btn btn-sm btn-outline-secondary fmt-preset"
+                      data-t="{title} [{title_id}]" data-e="{no}_{subtitle}">작품명 뒤에 작품번호</button>
+            </div>
+            <button class="btn btn-sm btn-outline-secondary" id="formatPreviewBtn">미리보기</button>
+            <div id="formatPreviewBox" style="margin-top:8px; color:#666; font-size:0.9em;"></div>
+            <div style="margin-top:6px; color:#999; font-size:0.85em;">
+              ※ 형식을 바꿔도 이미 받아 둔 폴더 이름은 바뀌지 않습니다. 새로 받는 회차부터 적용됩니다.
+              파일명에 쓸 수 없는 문자(\ / * ? : " &lt; &gt; |)는 자동으로 _ 로 바뀝니다.
+              {author} 는 글 작가를 먼저 적고 다른 사람이 그림을 그렸으면 뒤에 이어 붙입니다(예: 추공, 장성락(REDICE STUDIO)).
 
         {{ macros.setting_input_text('output_format', '이미지 저장 형식',
             value=arg['output_format'],
@@ -155,6 +194,33 @@ $(document).ready(function(){
   }
   syncProxyInput();
   $('body').on('change', '#use_proxy', syncProxyInput);
+});
+
+$('body').on('click', '.fmt-preset', function(e){
+  e.preventDefault();
+  $('#format_title').val($(this).attr('data-t'));
+  $('#format_episode').val($(this).attr('data-e'));
+  $('#formatPreviewBtn').click();
+});
+
+$('body').on('click', '#formatPreviewBtn', function(e){
+  e.preventDefault();
+  $.post('/' + package_name + '/ajax/basic/command',
+         {command: 'format_preview',
+          arg1: $('#format_title').val(),
+          arg2: $('#format_episode').val(),
+          arg3: $('#no_digits').val()},
+         function(data){
+    if(!data || data.ret !== 'success'){
+      $('#formatPreviewBox').html('<span style="color:#c00;">미리보기 실패</span>');
+      return;
+    }
+    var html = '저장 경로 예시: <code>' + $('<div>').text(data.path).html() + '</code>';
+    if(data.msg){ html += '<br/><span style="color:#c00;">' + $('<div>').text(data.msg).html() + '</span>'; }
+    $('#formatPreviewBox').html(html);
+  }).fail(function(xhr){
+    $('#formatPreviewBox').html('<span style="color:#c00;">서버 호출 실패: ' + xhr.status + '</span>');
+  });
 });
 
 $('body').on('click', '#select_download_path_btn', function(e){
