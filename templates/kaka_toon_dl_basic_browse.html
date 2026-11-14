@@ -18,7 +18,7 @@
     </div>
     <div class="row" style="align-items:center; margin-top:4px;">
       <div class="col-md-8" id="b_day_filter" style="margin-bottom:6px;">
-        <button class="btn btn-sm btn-success b-day" data-day="all">전체</button>
+        <button class="btn btn-sm btn-outline-secondary b-day" data-day="all">전체</button>
         <button class="btn btn-sm btn-outline-secondary b-day" data-day="월">월</button>
         <button class="btn btn-sm btn-outline-secondary b-day" data-day="화">화</button>
         <button class="btn btn-sm btn-outline-secondary b-day" data-day="수">수</button>
@@ -26,6 +26,8 @@
         <button class="btn btn-sm btn-outline-secondary b-day" data-day="금">금</button>
         <button class="btn btn-sm btn-outline-secondary b-day" data-day="토">토</button>
         <button class="btn btn-sm btn-outline-secondary b-day" data-day="일">일</button>
+        <button class="btn btn-sm btn-success b-day" data-day="연재">연재중</button>
+        <button class="btn btn-sm btn-outline-info b-day" data-day="완결">완결</button>
       </div>
       <div class="col-md-4" style="margin-bottom:6px; text-align:right;">
         <input id="b_search" class="form-control form-control-sm d-inline-block" type="text"
@@ -33,6 +35,24 @@
         <label style="margin-left:6px; font-weight:normal; white-space:nowrap;">
           <input type="checkbox" id="b_hide_registered"/> 등록 숨김
         </label>
+      </div>
+    </div>
+    <div class="row" style="align-items:center;">
+      <div class="col-md-12" style="margin-bottom:6px;">
+        <span class="b-flabel">장르</span>
+        <span id="b_genre_btns"><button class="btn btn-sm btn-success b-genre" data-genre="all">전체</button></span>
+      </div>
+    </div>
+    <div class="row" style="align-items:center;">
+      <div class="col-md-12" style="margin-bottom:6px;">
+        <span class="b-flabel">구분</span>
+        <button class="btn btn-sm btn-success b-flag" data-flag="all">전체</button>
+        <button class="btn btn-sm btn-outline-secondary b-flag" data-flag="new">신작</button>
+        <button class="btn btn-sm btn-outline-secondary b-flag" data-flag="up">UP</button>
+        <button class="btn btn-sm btn-outline-secondary b-flag" data-flag="waitfree">기다무</button>
+        <button class="btn btn-sm btn-outline-secondary b-flag" data-flag="rest">휴재</button>
+        <button class="btn btn-sm btn-outline-secondary b-flag" data-flag="adult">19세</button>
+        <button class="btn btn-sm btn-outline-secondary b-flag" data-flag="selected">선택한 작품</button>
       </div>
     </div>
     <div class="row">
@@ -103,6 +123,7 @@
 .b-d-synopsis { white-space:pre-line; font-size:13px; line-height:1.6;
                 border-top:1px solid #eee; padding-top:8px; }
 @media (max-width:576px){ .b-d-wrap { flex-direction:column; } .b-d-img { width:100%; } }
+.b-flabel { color:#888; font-size:12px; margin-right:6px; display:inline-block; min-width:28px; }
 </style>
 
 <script type="text/javascript">
@@ -110,7 +131,9 @@ var package_name = "{{ arg['package_name'] }}";
 var ALL = [];            // 전체 목록
 var REG = {};            // 등록된 contentId set
 var REGNAME = {};        // 등록된 제목(정규화) set
-var curDay = 'all';
+var curDay = '연재';   // 기본은 연재중만 (완결작은 '완결'·'전체'에서)
+var curGenre = 'all';    // 장르 필터
+var curFlag = 'all';     // 구분 필터 (신작·UP·기다무·휴재·19세·선택한 작품)
 var SEL = {};            // 체크한 contentId — 다시 그려도(필터·검색·상세 보기·목록 갱신) 유지
 var DETAIL = {};         // 상세 정보 캐시 (contentId → item)
 var curDetail = null;    // 상세 창에 떠 있는 contentId
@@ -152,12 +175,13 @@ function cardHtml(it){
   if (it.rest)     tags += '<span class="badge badge-secondary">휴재</span>';
   if (it.waitfree) tags += '<span class="badge badge-warning">기다무</span>';
   if (it.adult)    tags += '<span class="badge badge-danger">19</span>';
+  if (it.genre)    tags += '<span class="badge badge-light" style="border:1px solid #ddd;">' + escHtml(it.genre) + '</span>';
   var regTag = reg ? '<span class="b-reg-tag badge badge-success">등록됨</span>' : '';
   return ''
     + '<div class="' + cls + '" data-id="' + it.contentId + '">'
     +   '<input type="checkbox" class="b-check" data-id="' + it.contentId + '"' + (reg ? ' checked disabled' : (sel ? ' checked' : '')) + '/>'
     +   regTag
-    +   '<img class="b-thumb" src="' + (it.thumbnailUrl || '') + '" referrerpolicy="no-referrer" '
+    +   '<img class="b-thumb" loading="lazy" src="' + (it.thumbnailUrl || '') + '" referrerpolicy="no-referrer" '
     +        'onerror="this.style.visibility=\'hidden\'"/>'
     +   '<div class="b-name" title="클릭하면 상세 정보">' + escHtml(it.titleName || '-') + '</div>'
     +   '<div class="b-author">' + escHtml(it.author || '') + '</div>'
@@ -165,8 +189,38 @@ function cardHtml(it){
     + '</div>';
 }
 
+// 목록에 실제로 있는 장르만 버튼으로 만든다(작품 수 많은 순). 고른 장르는 유지.
+function buildGenres(){
+  var cnt = {};
+  ALL.forEach(function(it){ var g = it.genre || '기타'; cnt[g] = (cnt[g] || 0) + 1; });
+  var names = Object.keys(cnt).sort(function(a, b){ return cnt[b] - cnt[a]; });
+  if (curGenre !== 'all' && !cnt[curGenre]) curGenre = 'all';
+  var html = '<button class="btn btn-sm ' + (curGenre === 'all' ? 'btn-success' : 'btn-outline-secondary') + ' b-genre" data-genre="all">전체</button> ';
+  names.forEach(function(g){
+    html += '<button class="btn btn-sm ' + (curGenre === g ? 'btn-success' : 'btn-outline-secondary') + ' b-genre" data-genre="' + escHtml(g) + '">'
+         + escHtml(g) + ' <small>' + cnt[g] + '</small></button> ';
+  });
+  $('#b_genre_btns').html(html);
+}
+
+function flagOk(it){
+  switch (curFlag){
+    case 'new': return !!it['new'];
+    case 'up': return !!it.up;
+    case 'waitfree': return !!it.waitfree;
+    case 'rest': return !!it.rest;
+    case 'adult': return !!it.adult;
+    case 'selected': return !!SEL[it.contentId];
+  }
+  return true;
+}
+
 function visible(it){
-  if (curDay !== 'all' && (it.days || []).indexOf(curDay) < 0) return false;
+  if (curDay === '연재'){
+    if ((it.days || []).indexOf('완결') >= 0) return false;
+  } else if (curDay !== 'all' && (it.days || []).indexOf(curDay) < 0) return false;
+  if (curGenre !== 'all' && (it.genre || '기타') !== curGenre) return false;
+  if (!flagOk(it)) return false;
   if ($('#b_hide_registered').is(':checked') && isReg(it)) return false;
   var q = ($('#b_search').val() || '').trim().toLowerCase();
   if (q){
@@ -211,6 +265,7 @@ function loadList(){
       (data.registered_names || []).forEach(function(t){ REGNAME[t] = true; });
       pruneSel();
       $('#b_status').text('갱신됨 (' + ALL.length + '편)');
+      buildGenres();
       render();
     } else {
       $('#b_status').text((data && data.msg) || '실패');
@@ -231,6 +286,20 @@ $('body').on('click', '#b_reload', function(e){ e.preventDefault(); loadList(); 
 $('body').on('click', '.b-day', function(){
   curDay = $(this).data('day');
   $('.b-day').removeClass('btn-success').addClass('btn-outline-secondary');
+  $(this).removeClass('btn-outline-secondary').addClass('btn-success');
+  render();
+});
+
+$('body').on('click', '.b-genre', function(){
+  curGenre = String($(this).data('genre'));
+  $('.b-genre').removeClass('btn-success').addClass('btn-outline-secondary');
+  $(this).removeClass('btn-outline-secondary').addClass('btn-success');
+  render();
+});
+
+$('body').on('click', '.b-flag', function(){
+  curFlag = String($(this).data('flag'));
+  $('.b-flag').removeClass('btn-success').addClass('btn-outline-secondary');
   $(this).removeClass('btn-outline-secondary').addClass('btn-success');
   render();
 });
