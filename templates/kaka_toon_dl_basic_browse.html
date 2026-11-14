@@ -47,6 +47,36 @@
   <div id="b_grid" class="row" style="margin:0;"></div>
 </div>
 
+<div class="modal fade" id="b_detail" tabindex="-1" role="dialog">
+  <div class="modal-dialog modal-lg" role="document">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="b_d_title">작품 정보</h5>
+        <button type="button" class="close" data-dismiss="modal"><span>&times;</span></button>
+      </div>
+      <div class="modal-body">
+        <div class="b-d-wrap">
+          <img id="b_d_img" class="b-d-img" referrerpolicy="no-referrer"
+               onerror="this.style.visibility='hidden'"/>
+          <div class="b-d-info">
+            <div id="b_d_meta"></div>
+            <div id="b_d_eps" class="b-d-eps"></div>
+            <div id="b_d_synopsis" class="b-d-synopsis"></div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <a id="b_d_link" href="#" target="_blank" rel="noopener noreferrer"
+           class="btn btn-sm btn-outline-secondary mr-auto">카카오웹툰에서 보기</a>
+        <label id="b_d_sel_wrap" style="margin:0 10px 0 0; font-weight:normal;">
+          <input type="checkbox" id="b_d_sel"/> 등록 대상으로 선택
+        </label>
+        <button type="button" class="btn btn-sm btn-secondary" data-dismiss="modal">닫기</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <style>
 .b-card { border:1px solid #e3e3e3; border-radius:6px; padding:8px; margin:6px;
           width:170px; display:flex; flex-direction:column; position:relative; }
@@ -63,6 +93,16 @@
 .b-badges .badge { margin-right:2px; }
 .b-card .b-check { position:absolute; top:6px; left:6px; transform:scale(1.3); }
 .b-reg-tag { position:absolute; top:6px; right:6px; }
+.b-card .b-thumb, .b-card .b-name { cursor:pointer; }
+.b-d-wrap { display:flex; gap:14px; align-items:flex-start; }
+.b-d-img { width:180px; max-height:260px; object-fit:cover; border-radius:6px;
+           background:#eee; flex-shrink:0; }
+.b-d-info { flex:1; min-width:0; }
+.b-d-info .badge { margin-right:3px; }
+.b-d-eps { margin:8px 0; font-size:13px; }
+.b-d-synopsis { white-space:pre-line; font-size:13px; line-height:1.6;
+                border-top:1px solid #eee; padding-top:8px; }
+@media (max-width:576px){ .b-d-wrap { flex-direction:column; } .b-d-img { width:100%; } }
 </style>
 
 <script type="text/javascript">
@@ -71,6 +111,28 @@ var ALL = [];            // 전체 목록
 var REG = {};            // 등록된 contentId set
 var REGNAME = {};        // 등록된 제목(정규화) set
 var curDay = 'all';
+var SEL = {};            // 체크한 contentId — 다시 그려도(필터·검색·상세 보기·목록 갱신) 유지
+var DETAIL = {};         // 상세 정보 캐시 (contentId → item)
+var curDetail = null;    // 상세 창에 떠 있는 contentId
+
+function isReg(it){ return !!REG[it.contentId] || !!REGNAME[norm(it.titleName)]; }
+function escHtml(s){
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+  });
+}
+function fmtNum(n){
+  if (n == null) return '-';
+  if (n >= 100000000) return (n / 100000000).toFixed(1).replace(/\.0$/, '') + '억';
+  if (n >= 10000) return (n / 10000).toFixed(1).replace(/\.0$/, '') + '만';
+  return String(n);
+}
+// 등록된 작품은 선택 대상에서 빼고, 목록에서 사라진 작품도 정리한다.
+function pruneSel(){
+  var alive = {};
+  ALL.forEach(function(it){ if (!isReg(it)) alive[it.contentId] = true; });
+  Object.keys(SEL).forEach(function(k){ if (!alive[k]) delete SEL[k]; });
+}
 
 function norm(s){ return (s || '').replace(/\s+/g, '').toLowerCase(); }
 
@@ -81,8 +143,9 @@ function dayBadges(days){
 }
 
 function cardHtml(it){
-  var reg = !!REG[it.contentId] || !!REGNAME[norm(it.titleName)];
-  var cls = 'b-card' + (reg ? ' b-registered' : '');
+  var reg = isReg(it);
+  var sel = !reg && !!SEL[it.contentId];
+  var cls = 'b-card' + (reg ? ' b-registered' : '') + (sel ? ' b-selected' : '');
   var tags = '';
   if (it['new'])   tags += '<span class="badge badge-success">신작</span>';
   if (it.up)       tags += '<span class="badge badge-info">UP</span>';
@@ -92,19 +155,19 @@ function cardHtml(it){
   var regTag = reg ? '<span class="b-reg-tag badge badge-success">등록됨</span>' : '';
   return ''
     + '<div class="' + cls + '" data-id="' + it.contentId + '">'
-    +   '<input type="checkbox" class="b-check" data-id="' + it.contentId + '"' + (reg ? ' checked disabled' : '') + '/>'
+    +   '<input type="checkbox" class="b-check" data-id="' + it.contentId + '"' + (reg ? ' checked disabled' : (sel ? ' checked' : '')) + '/>'
     +   regTag
     +   '<img class="b-thumb" src="' + (it.thumbnailUrl || '') + '" referrerpolicy="no-referrer" '
     +        'onerror="this.style.visibility=\'hidden\'"/>'
-    +   '<div class="b-name">' + (it.titleName || '-') + '</div>'
-    +   '<div class="b-author">' + (it.author || '') + '</div>'
+    +   '<div class="b-name" title="클릭하면 상세 정보">' + escHtml(it.titleName || '-') + '</div>'
+    +   '<div class="b-author">' + escHtml(it.author || '') + '</div>'
     +   '<div class="b-badges">' + dayBadges(it.days) + ' ' + tags + '</div>'
     + '</div>';
 }
 
 function visible(it){
   if (curDay !== 'all' && (it.days || []).indexOf(curDay) < 0) return false;
-  if ($('#b_hide_registered').is(':checked') && (REG[it.contentId] || REGNAME[norm(it.titleName)])) return false;
+  if ($('#b_hide_registered').is(':checked') && isReg(it)) return false;
   var q = ($('#b_search').val() || '').trim().toLowerCase();
   if (q){
     var hay = ((it.titleName || '') + ' ' + (it.author || '')).toLowerCase();
@@ -119,18 +182,20 @@ function render(){
   for (var i = 0; i < list.length; i++) html += cardHtml(list[i]);
   $('#b_grid').html(html || '<div style="padding:20px; color:#999;">표시할 작품이 없습니다.</div>');
   $('#b_total').text(ALL.length);
-  $('#b_reg_count').text(ALL.filter(function(it){ return REG[it.contentId] || REGNAME[norm(it.titleName)]; }).length);
+  $('#b_reg_count').text(ALL.filter(isReg).length);
   updateSel();
 }
 
 function updateSel(){
-  var n = $('.b-check:checked:not(:disabled)').length;
+  // 선택 수는 화면에 보이는 것만이 아니라 SEL 전체(필터로 가려진 작품 포함)
+  var n = Object.keys(SEL).length;
   $('#b_sel_count').text(n);
   $('#b_add').prop('disabled', n === 0);
   $('.b-card').removeClass('b-selected');
   $('.b-check:checked').each(function(){
     $(this).closest('.b-card').addClass('b-selected');
   });
+  if (curDetail != null) $('#b_d_sel').prop('checked', !!SEL[curDetail]);
   var boxes = $('.b-check:not(:disabled)');
   $('#b_check_all').prop('checked', boxes.length > 0 && boxes.filter(':checked').length === boxes.length);
 }
@@ -144,6 +209,7 @@ function loadList(){
       REG = {}; REGNAME = {};
       (data.registered || []).forEach(function(t){ REG[t] = true; });
       (data.registered_names || []).forEach(function(t){ REGNAME[t] = true; });
+      pruneSel();
       $('#b_status').text('갱신됨 (' + ALL.length + '편)');
       render();
     } else {
@@ -171,21 +237,112 @@ $('body').on('click', '.b-day', function(){
 
 $('body').on('input', '#b_search', function(){ render(); });
 $('body').on('change', '#b_hide_registered', function(){ render(); });
-$('body').on('change', '.b-check', function(){ updateSel(); });
-
-$('body').on('change', '#b_check_all', function(){
-  $('.b-check:not(:disabled)').prop('checked', this.checked);
+$('body').on('change', '.b-check', function(){
+  var id = $(this).data('id');
+  if (this.checked) SEL[id] = true; else delete SEL[id];
+  $(this).closest('.b-card').toggleClass('b-selected', this.checked);
   updateSel();
 });
+
+$('body').on('change', '#b_check_all', function(){
+  var on = this.checked;
+  $('.b-check:not(:disabled)').each(function(){
+    var id = $(this).data('id');
+    $(this).prop('checked', on);
+    if (on) SEL[id] = true; else delete SEL[id];
+  });
+  render();
+});
+
+// 카드(체크박스 제외)를 누르면 상세 정보 — 그리드를 다시 그리지 않으므로 체크가 그대로 남는다.
+$('body').on('click', '.b-card', function(e){
+  if ($(e.target).is('.b-check')) return;
+  openDetail($(this).data('id'));
+});
+
+$('body').on('change', '#b_d_sel', function(){
+  if (curDetail == null) return;
+  if (this.checked) SEL[curDetail] = true; else delete SEL[curDetail];
+  var $box = $('.b-check[data-id="' + curDetail + '"]');
+  $box.prop('checked', this.checked);
+  $box.closest('.b-card').toggleClass('b-selected', this.checked);
+  updateSel();
+});
+
+$('#b_detail').on('hidden.bs.modal', function(){ curDetail = null; });
+
+function openDetail(id){
+  var it = ALL.filter(function(x){ return String(x.contentId) === String(id); })[0];
+  if (!it) return;
+  curDetail = it.contentId;
+  var reg = isReg(it);
+  $('#b_d_title').text(it.titleName || '작품 정보');
+  $('#b_d_img').css('visibility', 'visible').attr('src', it.thumbnailUrl || '');
+  $('#b_d_sel_wrap').toggle(!reg);
+  $('#b_d_sel').prop('checked', !!SEL[it.contentId]);
+  $('#b_d_link').attr('href', 'https://webtoon.kakao.com/content/'
+      + (it.seoId ? encodeURIComponent(it.seoId) + '/' : '') + it.contentId);
+  $('#b_d_meta').html('<div style="color:#666;">' + escHtml(it.author || '') + '</div>'
+      + '<div style="margin-top:4px;">' + dayBadges(it.days)
+      + (reg ? ' <span class="badge badge-success">등록됨</span>' : '') + '</div>');
+  $('#b_d_eps').html('<span style="color:#999;">불러오는 중...</span>');
+  $('#b_d_synopsis').text('');
+  $('#b_detail').modal('show');
+  if (DETAIL[it.contentId]){ fillDetail(it, DETAIL[it.contentId]); return; }
+  $.post('/' + package_name + '/ajax/basic/command',
+         {command: 'browse_detail', arg1: it.contentId}, function(data){
+    if (data && data.ret === 'success' && data.item){
+      DETAIL[it.contentId] = data.item;
+      if (String(curDetail) === String(it.contentId)) fillDetail(it, data.item);
+    } else if (String(curDetail) === String(it.contentId)){
+      $('#b_d_eps').html('<span style="color:#c00;">' + escHtml((data && data.msg) || '상세 정보 조회 실패') + '</span>');
+    }
+  }).fail(function(xhr){
+    if (String(curDetail) === String(it.contentId))
+      $('#b_d_eps').html('<span style="color:#c00;">서버 호출 실패: ' + xhr.status + '</span>');
+  });
+}
+
+function fillDetail(it, d){
+  var authors = (d.authors || []).filter(function(a){ return a.role !== '발행'; })
+      .map(function(a){ return escHtml(a.name) + (a.role ? ' <small style="color:#999;">' + escHtml(a.role) + '</small>' : ''); });
+  var stCls = d.status === '완결' ? 'badge-dark' : (d.status === '휴재' ? 'badge-secondary' : 'badge-primary');
+  var reg = isReg(it);
+  $('#b_d_meta').html(
+      '<div style="color:#666;">' + (authors.join(' · ') || escHtml(it.author || '')) + '</div>'
+    + '<div style="margin-top:4px;">'
+    +   '<span class="badge ' + stCls + '">' + escHtml(d.status || '') + '</span>'
+    +   (d.genre ? '<span class="badge badge-light" style="border:1px solid #ddd;">' + escHtml(d.genre) + '</span>' : '')
+    +   (d.adult ? '<span class="badge badge-danger">19</span>' : '')
+    +   (it.waitfree ? '<span class="badge badge-warning">기다무</span>' : '')
+    +   ' ' + dayBadges(it.days)
+    +   (reg ? ' <span class="badge badge-success">등록됨</span>' : '')
+    + '</div>'
+    + '<div style="margin-top:6px; font-size:12px; color:#777;">조회 ' + fmtNum(d.viewCount)
+    +   ' · 좋아요 ' + fmtNum(d.likeCount)
+    +   (d.firstDate ? ' · 연재 시작 ' + escHtml(d.firstDate) : '') + '</div>');
+  var eps = '';
+  if (d.totalEpisodes != null){
+    eps = '<b>총 ' + d.totalEpisodes + '화</b>';
+    if (d.latestTitle) eps += ' · 최신 ' + escHtml(d.latestTitle)
+        + (d.latestDate ? ' (' + escHtml(d.latestDate) + (d.latestUpcoming ? ' 공개 예정' : '') + ')' : '');
+    if (d.latestUpcoming) eps += '<div style="font-size:11px; color:#999;">총 회차 수에는 선공개 회차가 포함됩니다.</div>';
+  } else {
+    eps = '<span style="color:#999;">회차 정보를 가져오지 못했습니다.</span>';
+  }
+  $('#b_d_eps').html(eps);
+  $('#b_d_synopsis').text(d.synopsis || '줄거리 정보가 없습니다.');
+  if (d.web) $('#b_d_link').attr('href', d.web);
+}
 
 $('body').on('click', '#b_add', function(e){
   e.preventDefault();
   var ids = [], titles = [];
-  $('.b-check:checked:not(:disabled)').each(function(){
-    var id = $(this).data('id');
-    ids.push(id);
-    var it = ALL.filter(function(x){ return String(x.contentId) === String(id); })[0];
-    titles.push(it ? (it.titleName || '') : '');
+  ALL.forEach(function(it){
+    if (SEL[it.contentId] && !isReg(it)){
+      ids.push(it.contentId);
+      titles.push(it.titleName || '');
+    }
   });
   if (ids.length === 0){ $.notify('등록할 작품을 선택하세요', {className: 'warn'}); return; }
   if (!confirm(ids.length + '편을 스케줄(다운로드 목록)에 등록할까요?')) return;
@@ -197,6 +354,7 @@ $('body').on('click', '#b_add', function(e){
       REG = {}; REGNAME = {};
       (data.registered || []).forEach(function(t){ REG[t] = true; });
       (data.registered_names || []).forEach(function(t){ REGNAME[t] = true; });
+      pruneSel();
       render();
     } else {
       $.notify((data && data.msg) || '등록 실패', {className: 'error'});
